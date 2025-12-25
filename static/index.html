@@ -222,8 +222,7 @@
 
         <div class="main-tabs">
             <button class="main-tab active" onclick="showTab('scanner')">Scanner</button>
-            <button class="main-tab" onclick="showTab('collisions')">Collisions</button>
-            <button class="main-tab" onclick="showTab('keys')">Recovered Keys</button>
+            <button class="main-tab" onclick="showTab('recovery')">Recovery</button>
             <button class="main-tab" onclick="showTab('logs')">Logs</button>
         </div>
 
@@ -240,17 +239,7 @@
             </div>
         </div>
 
-        <div id="collisionsTab" class="tab-content">
-            <div class="section">
-                <h2>R-Value Collisions</h2>
-                <p style="color: #888; margin-bottom: 15px;">These R-values have been used in multiple transactions - indicating nonce reuse.</p>
-                <div class="collision-list" id="collisionList">
-                    <p style="color: #888; text-align: center;">Loading...</p>
-                </div>
-            </div>
-        </div>
-
-        <div id="keysTab" class="tab-content">
+        <div id="recoveryTab" class="tab-content">
             <div class="section">
                 <h2>
                     Recovered Private Keys
@@ -261,14 +250,20 @@
             </div>
 
             <div class="section">
-                <h2>Recovered Nonces</h2>
-                <p style="color: #888; margin-bottom: 15px;">Nonces (k values) derived from recovered keys. These enable cross-key recovery when other addresses reuse the same nonce.</p>
+                <h2>R-Value Collisions</h2>
+                <p style="color: #888; margin-bottom: 15px;">Detected nonce reuse - same R-value used in multiple transactions.</p>
+                <div class="collision-list" id="collisionList"></div>
+            </div>
+
+            <div class="section">
+                <h2>Cross-Key Recovery Data</h2>
+                <p style="color: #888; margin-bottom: 15px;">Nonces that can help recover keys from other addresses sharing the same R-value.</p>
                 <div id="noncesList"></div>
             </div>
 
             <div class="section">
                 <h2>Pending Components</h2>
-                <p style="color: #888; margin-bottom: 15px;">Cross-key collisions that aren't yet solvable. These may become recoverable when more signatures are found or related nonces are recovered.</p>
+                <p style="color: #888; margin-bottom: 15px;">Cross-key collisions awaiting more data to become solvable.</p>
                 <div id="componentsList"></div>
             </div>
         </div>
@@ -306,8 +301,7 @@
             event.target.classList.add('active');
             document.getElementById(name + 'Tab').classList.add('active');
             
-            if (name === 'collisions') fetchCollisions();
-            if (name === 'keys') fetchKeys();
+            if (name === 'recovery') fetchRecoveryData();
             if (name === 'logs') fetchLogs();
         }
 
@@ -350,6 +344,11 @@
             }
         }
 
+        async function fetchRecoveryData() {
+            // Fetch all recovery-related data
+            await Promise.all([fetchKeys(), fetchCollisions(), fetchNonces(), fetchComponents()]);
+        }
+
         async function fetchCollisions() {
             try {
                 const resp = await fetch('/api/collisions');
@@ -357,7 +356,7 @@
                 
                 const list = document.getElementById('collisionList');
                 if (!collisions?.length) {
-                    list.innerHTML = '<p style="color: #888; text-align: center;">No collisions found yet.</p>';
+                    list.innerHTML = '<p style="color: #888; text-align: center;">No collisions detected yet.</p>';
                     return;
                 }
 
@@ -386,99 +385,111 @@
 
         async function fetchKeys() {
             try {
-                // Fetch keys
-                const keysResp = await fetch('/api/recovered-keys');
-                const keys = await keysResp.json();
+                const resp = await fetch('/api/recovered-keys');
+                const keys = await resp.json();
                 
-                const keysList = document.getElementById('keysList');
+                const list = document.getElementById('keysList');
                 if (!keys?.length) {
-                    keysList.innerHTML = '<p style="color: #888; text-align: center;">No keys recovered yet.</p>';
-                } else {
-                    keysList.innerHTML = keys.map(k => {
-                        const explorer = explorers[k.chain_id] || '';
-                        return `
-                            <div class="key-card">
-                                <h4>${k.chain_name || 'Chain ' + k.chain_id} - Compromised Address</h4>
-                                <div class="key-field">
-                                    <label>Address</label>
-                                    <div class="value">
-                                        <a href="${explorer}/address/${k.address}" target="_blank" style="color: #f0b90b;">${k.address}</a>
-                                    </div>
-                                </div>
-                                <div class="key-field">
-                                    <label>Private Key (click to copy)</label>
-                                    <div class="value private-key" onclick="navigator.clipboard.writeText('${k.private_key}').then(() => alert('Copied!'))">
-                                        ${k.private_key}
-                                    </div>
-                                </div>
-                                <div class="key-field">
-                                    <label>Transactions</label>
-                                    <div class="value" style="font-size: 0.85em;">
-                                        ${k.tx_hashes?.map(tx => `<a href="${explorer}/tx/${tx}" target="_blank" style="color: #f0b90b;">${tx.substring(0, 16)}...</a>`).join(' | ') || '-'}
-                                    </div>
-                                </div>
-                                <div style="color: #888; font-size: 0.8em; margin-top: 10px;">Recovered: ${k.created_at}</div>
-                            </div>
-                        `;
-                    }).join('');
+                    list.innerHTML = '<p style="color: #888; text-align: center;">No keys recovered yet.</p>';
+                    return;
                 }
 
-                // Fetch nonces
-                const noncesResp = await fetch('/api/recovered-nonces');
-                const nonces = await noncesResp.json();
-                
-                const noncesList = document.getElementById('noncesList');
-                if (!nonces?.length) {
-                    noncesList.innerHTML = '<p style="color: #888; text-align: center;">No nonces recovered yet.</p>';
-                } else {
-                    noncesList.innerHTML = `
-                        <div style="background: rgba(0,0,0,0.3); border-radius: 8px; overflow: hidden;">
-                            <table style="width: 100%; border-collapse: collapse; font-size: 0.85em;">
-                                <thead>
-                                    <tr style="background: rgba(255,255,255,0.1);">
-                                        <th style="padding: 12px; text-align: left; color: #f0b90b;">R Value</th>
-                                        <th style="padding: 12px; text-align: left; color: #f0b90b;">Nonce (k)</th>
-                                        <th style="padding: 12px; text-align: left; color: #f0b90b;">Source Key ID</th>
-                                    </tr>
-                                </thead>
-                                <tbody>
-                                    ${nonces.map(n => `
-                                        <tr style="border-bottom: 1px solid rgba(255,255,255,0.05);">
-                                            <td style="padding: 12px; font-family: monospace; color: #f0b90b;">${n.r_value.substring(0, 20)}...${n.r_value.slice(-8)}</td>
-                                            <td style="padding: 12px; font-family: monospace;">${n.k_value.substring(0, 20)}...${n.k_value.slice(-8)}</td>
-                                            <td style="padding: 12px;">#${n.derived_from_key_id}</td>
-                                        </tr>
-                                    `).join('')}
-                                </tbody>
-                            </table>
+                list.innerHTML = keys.map(k => {
+                    const explorer = explorers[k.chain_id] || '';
+                    return `
+                        <div class="key-card">
+                            <h4>${k.chain_name || 'Chain ' + k.chain_id} - Compromised Address</h4>
+                            <div class="key-field">
+                                <label>Address</label>
+                                <div class="value">
+                                    <a href="${explorer}/address/${k.address}" target="_blank" style="color: #f0b90b;">${k.address}</a>
+                                </div>
+                            </div>
+                            <div class="key-field">
+                                <label>Private Key (click to copy)</label>
+                                <div class="value private-key" onclick="navigator.clipboard.writeText('${k.private_key}').then(() => alert('Copied!'))">
+                                    ${k.private_key}
+                                </div>
+                            </div>
+                            <div class="key-field">
+                                <label>Transactions</label>
+                                <div class="value" style="font-size: 0.85em;">
+                                    ${k.tx_hashes?.map(tx => `<a href="${explorer}/tx/${tx}" target="_blank" style="color: #f0b90b;">${tx.substring(0, 16)}...</a>`).join(' | ') || '-'}
+                                </div>
+                            </div>
+                            <div style="color: #888; font-size: 0.8em; margin-top: 10px;">Recovered: ${k.created_at}</div>
                         </div>
                     `;
+                }).join('');
+            } catch (e) {
+                console.error('Keys error:', e);
+            }
+        }
+
+        async function fetchNonces() {
+            try {
+                const resp = await fetch('/api/recovered-nonces');
+                const nonces = await resp.json();
+                
+                const list = document.getElementById('noncesList');
+                if (!nonces?.length) {
+                    list.innerHTML = '<p style="color: #888; text-align: center;">No cross-key nonces available.</p>';
+                    return;
                 }
 
-                // Fetch pending components
-                const compsResp = await fetch('/api/pending-components');
-                const comps = await compsResp.json();
-                
-                const compsList = document.getElementById('componentsList');
-                if (!comps?.length) {
-                    compsList.innerHTML = '<p style="color: #888; text-align: center;">No pending components.</p>';
-                } else {
-                    compsList.innerHTML = comps.map(c => `
-                        <div style="background: rgba(0,0,0,0.3); border-radius: 8px; padding: 15px; margin-bottom: 10px; border-left: 4px solid #9b59b6;">
-                            <div style="display: flex; justify-content: space-between; margin-bottom: 10px;">
-                                <span style="color: #9b59b6; font-weight: bold;">Component #${c.id}</span>
-                                <span style="color: #888;">${c.equations} equations / ${c.unknowns} unknowns (need ${c.unknowns - c.equations} more)</span>
-                            </div>
-                            <div style="font-size: 0.85em; color: #aaa;">
-                                <div><strong>Addresses:</strong> ${c.addresses?.length || 0}</div>
-                                <div><strong>R-Values:</strong> ${c.r_values?.length || 0}</div>
-                                <div><strong>Transactions:</strong> ${c.tx_hashes?.length || 0}</div>
-                            </div>
-                        </div>
-                    `).join('');
-                }
+                list.innerHTML = `
+                    <div style="background: rgba(0,0,0,0.3); border-radius: 8px; overflow: hidden;">
+                        <table style="width: 100%; border-collapse: collapse; font-size: 0.85em;">
+                            <thead>
+                                <tr style="background: rgba(255,255,255,0.1);">
+                                    <th style="padding: 12px; text-align: left; color: #f0b90b;">R Value</th>
+                                    <th style="padding: 12px; text-align: left; color: #f0b90b;">Nonce (k)</th>
+                                    <th style="padding: 12px; text-align: left; color: #f0b90b;">Source Key ID</th>
+                                </tr>
+                            </thead>
+                            <tbody>
+                                ${nonces.map(n => `
+                                    <tr style="border-bottom: 1px solid rgba(255,255,255,0.05);">
+                                        <td style="padding: 12px; font-family: monospace; color: #f0b90b;">${n.r_value.substring(0, 20)}...${n.r_value.slice(-8)}</td>
+                                        <td style="padding: 12px; font-family: monospace;">${n.k_value.substring(0, 20)}...${n.k_value.slice(-8)}</td>
+                                        <td style="padding: 12px;">#${n.derived_from_key_id}</td>
+                                    </tr>
+                                `).join('')}
+                            </tbody>
+                        </table>
+                    </div>
+                `;
             } catch (e) {
-                console.error('Keys/nonces error:', e);
+                console.error('Nonces error:', e);
+            }
+        }
+
+        async function fetchComponents() {
+            try {
+                const resp = await fetch('/api/pending-components');
+                const comps = await resp.json();
+                
+                const list = document.getElementById('componentsList');
+                if (!comps?.length) {
+                    list.innerHTML = '<p style="color: #888; text-align: center;">No pending components.</p>';
+                    return;
+                }
+
+                list.innerHTML = comps.map(c => `
+                    <div style="background: rgba(0,0,0,0.3); border-radius: 8px; padding: 15px; margin-bottom: 10px; border-left: 4px solid #9b59b6;">
+                        <div style="display: flex; justify-content: space-between; margin-bottom: 10px;">
+                            <span style="color: #9b59b6; font-weight: bold;">Component #${c.id}</span>
+                            <span style="color: #888;">${c.equations} equations / ${c.unknowns} unknowns (need ${c.unknowns - c.equations} more)</span>
+                        </div>
+                        <div style="font-size: 0.85em; color: #aaa;">
+                            <div><strong>Addresses:</strong> ${c.addresses?.length || 0}</div>
+                            <div><strong>R-Values:</strong> ${c.r_values?.length || 0}</div>
+                            <div><strong>Transactions:</strong> ${c.tx_hashes?.length || 0}</div>
+                        </div>
+                    </div>
+                `).join('');
+            } catch (e) {
+                console.error('Components error:', e);
             }
         }
 
@@ -526,8 +537,7 @@
         setInterval(fetchStats, 3000);
         setInterval(() => {
             const active = document.querySelector('.tab-content.active');
-            if (active?.id === 'collisionsTab') fetchCollisions();
-            if (active?.id === 'keysTab') fetchKeys();
+            if (active?.id === 'recoveryTab') fetchRecoveryData();
             if (active?.id === 'logsTab') fetchLogs();
         }, 5000);
     </script>

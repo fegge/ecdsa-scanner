@@ -504,18 +504,20 @@ func (s *Scanner) attemptSameKeyRecovery(ctx context.Context, event CollisionEve
 
 	s.logger.Info("[RECOVERY] *** SUCCESS *** Recovered key for %s", tx1.From)
 
-	// Derive and save nonce for future cross-key recovery
-	nonce := recovery.DeriveNonce(tx1.Z, tx1.R, tx1.S, privKey)
-	s.db.SaveRecoveredNonce(ctx, &db.RecoveredNonce{
-		RValue:           event.RValue,
-		KValue:           nonce,
-		DerivedFromKeyID: keyID,
-	})
+	// Only save nonce if it can help recover other keys (cross-key potential)
+	hasCrossKey, _ := s.db.HasCrossKeyPotential(ctx, event.RValue, tx1.From)
+	if hasCrossKey {
+		nonce := recovery.DeriveNonce(tx1.Z, tx1.R, tx1.S, privKey)
+		s.db.SaveRecoveredNonce(ctx, &db.RecoveredNonce{
+			RValue:           event.RValue,
+			KValue:           nonce,
+			DerivedFromKeyID: keyID,
+		})
+		s.logger.Info("[RECOVERY] Saved nonce for cross-key recovery (R=%s...)", event.RValue[:18])
 
-	s.logger.Info("[RECOVERY] Saved nonce for R=%s...", event.RValue[:18])
-
-	// Check if this unlocks any pending components
-	s.checkPendingComponents(ctx, event.RValue, nonce)
+		// Check if this unlocks any pending components
+		s.checkPendingComponents(ctx, event.RValue, nonce)
+	}
 }
 
 func (s *Scanner) attemptCrossKeyRecoveryWithKnownNonce(ctx context.Context, event CollisionEvent, txData *TxData, nonce *db.RecoveredNonce) {

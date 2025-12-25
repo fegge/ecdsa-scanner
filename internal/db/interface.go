@@ -12,6 +12,7 @@ type Database interface {
 	RecordCollision(ctx context.Context, rValue, txHash string, chainID int, address string) error
 	GetCollisionTxRefs(ctx context.Context, rValue string) ([]TxRef, error)
 	GetAllCollisions(ctx context.Context) ([]Collision, error)
+	HasCrossKeyPotential(ctx context.Context, rValue, excludeAddress string) (bool, error)
 
 	// Scan state
 	GetLastBlock(ctx context.Context, chainID int) (uint64, error)

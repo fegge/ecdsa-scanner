@@ -58,6 +58,10 @@ func (m *MockDB) GetAllCollisions(ctx context.Context) ([]Collision, error) {
 	return []Collision{}, nil
 }
 
+func (m *MockDB) HasCrossKeyPotential(ctx context.Context, rValue, excludeAddress string) (bool, error) {
+	return false, nil
+}
+
 func (m *MockDB) GetLastBlock(ctx context.Context, chainID int) (uint64, error) {
 	m.mu.RLock()
 	defer m.mu.RUnlock()

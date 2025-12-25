@@ -542,6 +542,22 @@ func (db *DB) GetStats(ctx context.Context) (*Stats, error) {
 	return stats, nil
 }
 
+// HasCrossKeyPotential checks if an R-value has signatures from multiple addresses
+func (db *DB) HasCrossKeyPotential(ctx context.Context, rValue string, excludeAddress string) (bool, error) {
+	rBytes := hexToBytes(rValue)
+	excludeBytes := hexToBytes(excludeAddress)
+
+	var count int
+	err := db.conn.QueryRowContext(ctx, `
+		SELECT COUNT(DISTINCT address) FROM collisions 
+		WHERE r_value = $1 AND address != $2 AND address IS NOT NULL
+	`, rBytes, excludeBytes).Scan(&count)
+	if err != nil {
+		return false, db.wrapError(err)
+	}
+	return count > 0, nil
+}
+
 // GetAllCollisions returns all R values that have collisions
 func (db *DB) GetAllCollisions(ctx context.Context) ([]Collision, error) {
 	rows, err := db.conn.QueryContext(ctx,
