@@ -2,12 +2,12 @@ package recovery
 
 import (
 	"crypto/ecdsa"
-	"crypto/rand"
 	"encoding/hex"
 	"math/big"
 	"testing"
 
 	"github.com/ethereum/go-ethereum/crypto"
+	"pgregory.net/rapid"
 )
 
 // signWithNonce signs a message hash with a specific nonce k
@@ -29,376 +29,387 @@ func signWithNonce(privKey *ecdsa.PrivateKey, hash []byte, k *big.Int) (*big.Int
 	s.Mul(s, kInv)
 	s.Mod(s, N)
 
-	// Note: We don't normalize s to low-S here because the recovery math
-	// depends on the exact s values used. In real transactions, both
-	// normalized and non-normalized s values work with the recovery algorithm
-	// as long as both signatures use consistent s values.
-
 	return r, s
 }
 
-func TestRecoverFromSignatures_SameKey(t *testing.T) {
-	// Generate a random private key
-	privKey, err := crypto.GenerateKey()
+// genPrivateKey generates a random ECDSA private key
+func genPrivateKey(t *rapid.T) *ecdsa.PrivateKey {
+	key, err := crypto.GenerateKey()
 	if err != nil {
-		t.Fatalf("Failed to generate key: %v", err)
+		t.Fatal(err)
 	}
-	expectedAddr := crypto.PubkeyToAddress(privKey.PublicKey).Hex()
-	expectedPrivHex := "0x" + hex.EncodeToString(crypto.FromECDSA(privKey))
-
-	// Generate a random nonce (this is what we'll reuse)
-	k, err := rand.Int(rand.Reader, secp256k1N)
-	if err != nil {
-		t.Fatalf("Failed to generate nonce: %v", err)
-	}
-
-	// Create two different message hashes
-	hash1 := crypto.Keccak256([]byte("message 1"))
-	hash2 := crypto.Keccak256([]byte("message 2"))
-
-	// Sign both messages with the SAME nonce (vulnerability!)
-	r1, s1 := signWithNonce(privKey, hash1, k)
-	r2, s2 := signWithNonce(privKey, hash2, k)
-
-	// Verify both signatures have the same R value
-	if r1.Cmp(r2) != 0 {
-		t.Fatalf("R values should match: %x vs %x", r1, r2)
-	}
-
-	// Now recover the private key
-	z1 := new(big.Int).SetBytes(hash1)
-	z2 := new(big.Int).SetBytes(hash2)
-
-	recoveredPriv, err := RecoverFromSignatures(z1, r1, s1, z2, r2, s2)
-	if err != nil {
-		t.Fatalf("Failed to recover private key: %v", err)
-	}
-
-	// Verify the recovered key matches
-	if !VerifyPrivateKey(recoveredPriv, expectedAddr) {
-		t.Errorf("Recovered key doesn't match expected address")
-		t.Errorf("Expected: %s", expectedPrivHex)
-		t.Errorf("Got: %s", recoveredPriv)
-	}
+	return key
 }
 
-func TestRecoverFromSignatures_MultipleRecoveries(t *testing.T) {
-	// Test multiple key recoveries to ensure consistency
-	for i := 0; i < 10; i++ {
-		privKey, _ := crypto.GenerateKey()
-		expectedAddr := crypto.PubkeyToAddress(privKey.PublicKey).Hex()
+// genNonce generates a random valid nonce (1 < k < n)
+func genNonce(t *rapid.T) *big.Int {
+	// Generate random bytes and reduce mod n
+	bytes := rapid.SliceOfN(rapid.Byte(), 32, 32).Draw(t, "nonce_bytes")
+	k := new(big.Int).SetBytes(bytes)
+	k.Mod(k, secp256k1N)
+	// Ensure k > 0
+	if k.Sign() == 0 {
+		k.SetInt64(1)
+	}
+	return k
+}
 
-		k, _ := rand.Int(rand.Reader, secp256k1N)
+// genMessageHash generates a random 32-byte message hash
+func genMessageHash(t *rapid.T) []byte {
+	return rapid.SliceOfN(rapid.Byte(), 32, 32).Draw(t, "hash")
+}
 
-		hash1 := crypto.Keccak256([]byte("test message A"))
-		hash2 := crypto.Keccak256([]byte("test message B"))
+// Property: Recovering a private key from two signatures with the same nonce always works
+func TestPropertySameKeyRecovery(t *testing.T) {
+	rapid.Check(t, func(t *rapid.T) {
+		privKey := genPrivateKey(t)
+		k := genNonce(t)
+		hash1 := genMessageHash(t)
+		hash2 := genMessageHash(t)
+
+		// Ensure different messages
+		if string(hash1) == string(hash2) {
+			hash2[0] ^= 0xff
+		}
 
 		r1, s1 := signWithNonce(privKey, hash1, k)
 		r2, s2 := signWithNonce(privKey, hash2, k)
+
+		// Same nonce means same R
+		if r1.Cmp(r2) != 0 {
+			t.Fatalf("R values should match for same nonce")
+		}
+
+		// Skip if s values are identical (degenerate case)
+		if s1.Cmp(s2) == 0 {
+			t.Skip("identical s values")
+		}
 
 		z1 := new(big.Int).SetBytes(hash1)
 		z2 := new(big.Int).SetBytes(hash2)
 
 		recoveredPriv, err := RecoverFromSignatures(z1, r1, s1, z2, r2, s2)
 		if err != nil {
-			t.Errorf("Iteration %d: Failed to recover: %v", i, err)
-			continue
+			t.Fatalf("recovery failed: %v", err)
 		}
 
+		expectedAddr := crypto.PubkeyToAddress(privKey.PublicKey).Hex()
 		if !VerifyPrivateKey(recoveredPriv, expectedAddr) {
-			t.Errorf("Iteration %d: Recovered key doesn't match", i)
-		}
-	}
-}
-
-func TestRecoverWithKnownNonce(t *testing.T) {
-	// Generate a random private key
-	privKey, err := crypto.GenerateKey()
-	if err != nil {
-		t.Fatalf("Failed to generate key: %v", err)
-	}
-	expectedAddr := crypto.PubkeyToAddress(privKey.PublicKey).Hex()
-
-	// Generate a random nonce
-	k, err := rand.Int(rand.Reader, secp256k1N)
-	if err != nil {
-		t.Fatalf("Failed to generate nonce: %v", err)
-	}
-	kHex := "0x" + hex.EncodeToString(k.FillBytes(make([]byte, 32)))
-
-	// Create a message and sign it
-	hash := crypto.Keccak256([]byte("test message"))
-	r, s := signWithNonce(privKey, hash, k)
-	z := new(big.Int).SetBytes(hash)
-
-	// Recover using the known nonce
-	recoveredPriv, err := RecoverWithKnownNonce(z, r, s, kHex)
-	if err != nil {
-		t.Fatalf("Failed to recover with known nonce: %v", err)
-	}
-
-	if !VerifyPrivateKey(recoveredPriv, expectedAddr) {
-		t.Errorf("Recovered key doesn't match expected address")
-	}
-}
-
-func TestDeriveNonce(t *testing.T) {
-	// Generate a random private key
-	privKey, err := crypto.GenerateKey()
-	if err != nil {
-		t.Fatalf("Failed to generate key: %v", err)
-	}
-	privKeyHex := "0x" + hex.EncodeToString(crypto.FromECDSA(privKey))
-
-	// Generate a random nonce
-	k, err := rand.Int(rand.Reader, secp256k1N)
-	if err != nil {
-		t.Fatalf("Failed to generate nonce: %v", err)
-	}
-	expectedKHex := "0x" + hex.EncodeToString(k.FillBytes(make([]byte, 32)))
-
-	// Create a message and sign it
-	hash := crypto.Keccak256([]byte("test message"))
-	r, s := signWithNonce(privKey, hash, k)
-	z := new(big.Int).SetBytes(hash)
-
-	// Derive the nonce from the signature
-	derivedK := DeriveNonce(z, r, s, privKeyHex)
-
-	if derivedK != expectedKHex {
-		t.Errorf("Derived nonce doesn't match")
-		t.Errorf("Expected: %s", expectedKHex)
-		t.Errorf("Got: %s", derivedK)
-	}
-}
-
-func TestCrossKeyRecovery(t *testing.T) {
-	// Simulate cross-key nonce reuse scenario:
-	// Key A uses nonce k, we recover k
-	// Key B also uses nonce k, we recover Key B using known k
-
-	// Generate two different private keys
-	privKeyA, _ := crypto.GenerateKey()
-	privKeyB, _ := crypto.GenerateKey()
-	expectedAddrB := crypto.PubkeyToAddress(privKeyB.PublicKey).Hex()
-	privKeyAHex := "0x" + hex.EncodeToString(crypto.FromECDSA(privKeyA))
-
-	// Same nonce used by both keys (bad RNG!)
-	k, _ := rand.Int(rand.Reader, secp256k1N)
-
-	// Key A signs two messages with the same nonce (same-key reuse)
-	hashA1 := crypto.Keccak256([]byte("key A message 1"))
-	hashA2 := crypto.Keccak256([]byte("key A message 2"))
-	rA1, sA1 := signWithNonce(privKeyA, hashA1, k)
-	_, sA2 := signWithNonce(privKeyA, hashA2, k)
-
-	// Key B signs one message with the same nonce
-	hashB := crypto.Keccak256([]byte("key B message"))
-	rB, sB := signWithNonce(privKeyB, hashB, k)
-
-	// Step 1: Recover Key A from its nonce reuse
-	zA1 := new(big.Int).SetBytes(hashA1)
-	zA2 := new(big.Int).SetBytes(hashA2)
-
-	recoveredPrivA, err := RecoverFromSignatures(zA1, rA1, sA1, zA2, rA1, sA2)
-	if err != nil {
-		t.Fatalf("Failed to recover Key A: %v", err)
-	}
-
-	// Step 2: Derive the nonce from Key A's signature
-	derivedK := DeriveNonce(zA1, rA1, sA1, privKeyAHex)
-
-	// Verify r values match (same k means same R)
-	if rA1.Cmp(rB) != 0 {
-		t.Fatalf("R values should match for same nonce")
-	}
-
-	// Step 3: Use the known nonce to recover Key B
-	zB := new(big.Int).SetBytes(hashB)
-	recoveredPrivB, err := RecoverWithKnownNonce(zB, rB, sB, derivedK)
-	if err != nil {
-		t.Fatalf("Failed to recover Key B with known nonce: %v", err)
-	}
-
-	// Verify Key B was recovered correctly
-	if !VerifyPrivateKey(recoveredPrivB, expectedAddrB) {
-		t.Errorf("Recovered Key B doesn't match expected address")
-	}
-
-	// Also verify Key A recovery worked
-	expectedAddrA := crypto.PubkeyToAddress(privKeyA.PublicKey).Hex()
-	if !VerifyPrivateKey(recoveredPrivA, expectedAddrA) {
-		t.Errorf("Recovered Key A doesn't match expected address")
-	}
-}
-
-func TestRecoverFromSignatures_EdgeCases(t *testing.T) {
-	t.Run("different R values", func(t *testing.T) {
-		_, err := RecoverFromSignatures(
-			big.NewInt(1), big.NewInt(100), big.NewInt(200),
-			big.NewInt(2), big.NewInt(101), big.NewInt(300),
-		)
-		if err == nil {
-			t.Error("Should fail when R values don't match")
-		}
-	})
-
-	t.Run("identical signatures", func(t *testing.T) {
-		_, err := RecoverFromSignatures(
-			big.NewInt(1), big.NewInt(100), big.NewInt(200),
-			big.NewInt(1), big.NewInt(100), big.NewInt(200),
-		)
-		if err == nil {
-			t.Error("Should fail when signatures are identical")
+			t.Fatalf("recovered key doesn't match: got %s", recoveredPriv)
 		}
 	})
 }
 
-func TestVerifyPrivateKey(t *testing.T) {
-	// Known test case - never use this key on mainnet!
-	testPrivKey := "0x4c0883a69102937d6231471b5dbb6204fe5129617082792ae468d01a3f362318"
-	expectedAddr := "0x2c7536E3605D9C16a7a3D7b1898e529396a65c23"
+// Property: Recovering with a known nonce always works
+func TestPropertyKnownNonceRecovery(t *testing.T) {
+	rapid.Check(t, func(t *rapid.T) {
+		privKey := genPrivateKey(t)
+		k := genNonce(t)
+		hash := genMessageHash(t)
 
-	if !VerifyPrivateKey(testPrivKey, expectedAddr) {
-		t.Error("VerifyPrivateKey failed for known key")
-	}
+		r, s := signWithNonce(privKey, hash, k)
+		z := new(big.Int).SetBytes(hash)
 
-	if VerifyPrivateKey(testPrivKey, "0x0000000000000000000000000000000000000000") {
-		t.Error("VerifyPrivateKey should fail for wrong address")
-	}
+		kHex := "0x" + hex.EncodeToString(k.FillBytes(make([]byte, 32)))
+
+		recoveredPriv, err := RecoverWithKnownNonce(z, r, s, kHex)
+		if err != nil {
+			t.Fatalf("recovery failed: %v", err)
+		}
+
+		expectedAddr := crypto.PubkeyToAddress(privKey.PublicKey).Hex()
+		if !VerifyPrivateKey(recoveredPriv, expectedAddr) {
+			t.Fatalf("recovered key doesn't match")
+		}
+	})
 }
 
-func TestGetAddressFromPrivateKey(t *testing.T) {
-	testPrivKey := "0x4c0883a69102937d6231471b5dbb6204fe5129617082792ae468d01a3f362318"
-	expectedAddr := "0x2c7536E3605D9C16a7a3D7b1898e529396a65c23"
+// Property: Deriving nonce from signature and private key is correct
+func TestPropertyDeriveNonce(t *testing.T) {
+	rapid.Check(t, func(t *rapid.T) {
+		privKey := genPrivateKey(t)
+		k := genNonce(t)
+		hash := genMessageHash(t)
 
-	addr, err := GetAddressFromPrivateKey(testPrivKey)
-	if err != nil {
-		t.Fatalf("GetAddressFromPrivateKey failed: %v", err)
-	}
+		r, s := signWithNonce(privKey, hash, k)
+		z := new(big.Int).SetBytes(hash)
 
-	if addr != expectedAddr {
-		t.Errorf("Expected %s, got %s", expectedAddr, addr)
-	}
+		privKeyHex := "0x" + hex.EncodeToString(crypto.FromECDSA(privKey))
+		derivedKHex := DeriveNonce(z, r, s, privKeyHex)
+
+		expectedKHex := "0x" + hex.EncodeToString(k.FillBytes(make([]byte, 32)))
+		if derivedKHex != expectedKHex {
+			t.Fatalf("nonce mismatch: got %s, want %s", derivedKHex, expectedKHex)
+		}
+	})
 }
 
-func TestLinearSystemMultiKeyMultiNonce(t *testing.T) {
-	// Scenario: 3 different keys share 2 nonces due to bad RNG
-	// Key A and Key B both use nonce k1
-	// Key B and Key C both use nonce k2
-	// This creates a chain that lets us recover all 3 keys
+// Property: Cross-key recovery works when nonce is shared
+func TestPropertyCrossKeyRecovery(t *testing.T) {
+	rapid.Check(t, func(t *rapid.T) {
+		// Two different keys share the same nonce
+		privKeyA := genPrivateKey(t)
+		privKeyB := genPrivateKey(t)
+		k := genNonce(t)
 
-	// Generate 3 private keys
-	privKeyA, _ := crypto.GenerateKey()
-	privKeyB, _ := crypto.GenerateKey()
-	privKeyC, _ := crypto.GenerateKey()
+		hashA1 := genMessageHash(t)
+		hashA2 := genMessageHash(t)
+		hashB := genMessageHash(t)
 
-	// Generate 2 shared nonces
-	k1, _ := rand.Int(rand.Reader, secp256k1N)
-	k2, _ := rand.Int(rand.Reader, secp256k1N)
+		// Ensure different messages for key A
+		if string(hashA1) == string(hashA2) {
+			hashA2[0] ^= 0xff
+		}
 
-	// Create signatures:
-	// Key A signs msg1 and msg2 with k1 (same-key reuse)
-	// Key B signs msg3 with k1 and msg4 with k2 (cross-key bridge)
-	// Key C signs msg5 and msg6 with k2 (same-key reuse)
+		// Key A signs two messages with same nonce (recoverable)
+		rA1, sA1 := signWithNonce(privKeyA, hashA1, k)
+		_, sA2 := signWithNonce(privKeyA, hashA2, k)
 
-	msg1 := crypto.Keccak256([]byte("msg1"))
-	msg2 := crypto.Keccak256([]byte("msg2"))
-	msg3 := crypto.Keccak256([]byte("msg3"))
-	msg4 := crypto.Keccak256([]byte("msg4"))
-	msg5 := crypto.Keccak256([]byte("msg5"))
-	msg6 := crypto.Keccak256([]byte("msg6"))
+		// Key B signs one message with same nonce
+		rB, sB := signWithNonce(privKeyB, hashB, k)
 
-	r1, s1 := signWithNonce(privKeyA, msg1, k1)
-	_, s2 := signWithNonce(privKeyA, msg2, k1) // r2 == r1
-	r3, s3 := signWithNonce(privKeyB, msg3, k1) // r3 == r1
-	r4, s4 := signWithNonce(privKeyB, msg4, k2)
-	_, s5 := signWithNonce(privKeyC, msg5, k2) // r5 == r4
-	_, s6 := signWithNonce(privKeyC, msg6, k2) // r6 == r4
+		// Skip degenerate cases
+		if sA1.Cmp(sA2) == 0 {
+			t.Skip("identical s values for key A")
+		}
 
-	// Verify nonce reuse creates matching R values
-	if r1.Cmp(r3) != 0 {
-		t.Fatal("k1 should produce same R for different keys")
-	}
-	if r4.Cmp(r4) != 0 {
-		t.Fatal("k2 should produce same R for different keys")
-	}
+		// Step 1: Recover Key A
+		zA1 := new(big.Int).SetBytes(hashA1)
+		zA2 := new(big.Int).SetBytes(hashA2)
 
-	// Build linear system
-	// Equation: s*k - r*d = z (mod n)
-	// Rearranged: s*k + (-r)*d = z
+		recoveredPrivA, err := RecoverFromSignatures(zA1, rA1, sA1, zA2, rA1, sA2)
+		if err != nil {
+			t.Fatalf("Key A recovery failed: %v", err)
+		}
 
-	ls := NewLinearSystem(secp256k1N)
+		// Step 2: Derive nonce from Key A's signature
+		derivedK := DeriveNonce(zA1, rA1, sA1, recoveredPrivA)
 
-	// Variables: k1, k2, dA, dB, dC
-	k1Idx := ls.AddVariable("k1")
-	k2Idx := ls.AddVariable("k2")
-	dAIdx := ls.AddVariable("dA")
-	dBIdx := ls.AddVariable("dB")
-	dCIdx := ls.AddVariable("dC")
+		// Step 3: Use known nonce to recover Key B
+		zB := new(big.Int).SetBytes(hashB)
+		recoveredPrivB, err := RecoverWithKnownNonce(zB, rB, sB, derivedK)
+		if err != nil {
+			t.Fatalf("Key B recovery failed: %v", err)
+		}
 
-	negR1 := new(big.Int).Neg(r1)
-	negR1.Mod(negR1, secp256k1N)
-	negR4 := new(big.Int).Neg(r4)
-	negR4.Mod(negR4, secp256k1N)
+		// Verify both recoveries
+		expectedAddrA := crypto.PubkeyToAddress(privKeyA.PublicKey).Hex()
+		expectedAddrB := crypto.PubkeyToAddress(privKeyB.PublicKey).Hex()
 
-	z1 := new(big.Int).SetBytes(msg1)
-	z2 := new(big.Int).SetBytes(msg2)
-	z3 := new(big.Int).SetBytes(msg3)
-	z4 := new(big.Int).SetBytes(msg4)
-	z5 := new(big.Int).SetBytes(msg5)
-	z6 := new(big.Int).SetBytes(msg6)
+		if !VerifyPrivateKey(recoveredPrivA, expectedAddrA) {
+			t.Fatalf("Key A mismatch")
+		}
+		if !VerifyPrivateKey(recoveredPrivB, expectedAddrB) {
+			t.Fatalf("Key B mismatch")
+		}
+	})
+}
 
-	// sig1: s1*k1 - r1*dA = z1 → Key A, nonce k1
-	ls.AddEquation(map[int]*big.Int{k1Idx: s1, dAIdx: negR1}, z1)
-	// sig2: s2*k1 - r1*dA = z2 → Key A, nonce k1
-	ls.AddEquation(map[int]*big.Int{k1Idx: s2, dAIdx: negR1}, z2)
-	// sig3: s3*k1 - r1*dB = z3 → Key B, nonce k1
-	ls.AddEquation(map[int]*big.Int{k1Idx: s3, dBIdx: negR1}, z3)
-	// sig4: s4*k2 - r4*dB = z4 → Key B, nonce k2
-	ls.AddEquation(map[int]*big.Int{k2Idx: s4, dBIdx: negR4}, z4)
-	// sig5: s5*k2 - r4*dC = z5 → Key C, nonce k2
-	ls.AddEquation(map[int]*big.Int{k2Idx: s5, dCIdx: negR4}, z5)
-	// sig6: s6*k2 - r4*dC = z6 → Key C, nonce k2
-	ls.AddEquation(map[int]*big.Int{k2Idx: s6, dCIdx: negR4}, z6)
+// Property: Linear system solves multi-key multi-nonce scenarios
+func TestPropertyLinearSystemMultiKey(t *testing.T) {
+	rapid.Check(t, func(t *rapid.T) {
+		// 3 keys, 2 shared nonces
+		privKeyA := genPrivateKey(t)
+		privKeyB := genPrivateKey(t)
+		privKeyC := genPrivateKey(t)
 
-	t.Logf("System: %d equations, %d variables", ls.NumEquations(), ls.NumVariables())
+		k1 := genNonce(t)
+		k2 := genNonce(t)
 
-	if !ls.CanSolve() {
-		t.Fatal("System should be solvable")
-	}
+		// Generate 6 different message hashes
+		msgs := make([][]byte, 6)
+		for i := range msgs {
+			msgs[i] = genMessageHash(t)
+			// Ensure uniqueness
+			msgs[i][0] = byte(i)
+		}
 
-	solutions, err := ls.Solve()
-	if err != nil {
-		t.Fatalf("Failed to solve: %v", err)
-	}
+		// Sign:
+		// msg0, msg1: Key A with k1
+		// msg2: Key B with k1
+		// msg3: Key B with k2
+		// msg4, msg5: Key C with k2
 
-	// Verify recovered values match originals
-	if solutions["k1"].Cmp(k1) != 0 {
-		t.Errorf("k1 mismatch")
-	}
-	if solutions["k2"].Cmp(k2) != 0 {
-		t.Errorf("k2 mismatch")
-	}
-	if solutions["dA"].Cmp(privKeyA.D) != 0 {
-		t.Errorf("dA mismatch")
-	}
-	if solutions["dB"].Cmp(privKeyB.D) != 0 {
-		t.Errorf("dB mismatch")
-	}
-	if solutions["dC"].Cmp(privKeyC.D) != 0 {
-		t.Errorf("dC mismatch")
-	}
+		r1, s1 := signWithNonce(privKeyA, msgs[0], k1)
+		_, s2 := signWithNonce(privKeyA, msgs[1], k1)
+		_, s3 := signWithNonce(privKeyB, msgs[2], k1)
+		r4, s4 := signWithNonce(privKeyB, msgs[3], k2)
+		_, s5 := signWithNonce(privKeyC, msgs[4], k2)
+		_, s6 := signWithNonce(privKeyC, msgs[5], k2)
 
-	// Verify we can derive addresses from recovered keys
-	dABytes := solutions["dA"].FillBytes(make([]byte, 32))
-	recoveredA, _ := crypto.ToECDSA(dABytes)
-	addrA := crypto.PubkeyToAddress(recoveredA.PublicKey).Hex()
-	expectedAddrA := crypto.PubkeyToAddress(privKeyA.PublicKey).Hex()
+		// Build linear system
+		ls := NewLinearSystem(secp256k1N)
 
-	if addrA != expectedAddrA {
-		t.Errorf("Recovered address A mismatch: got %s, want %s", addrA, expectedAddrA)
-	}
+		k1Idx := ls.AddVariable("k1")
+		k2Idx := ls.AddVariable("k2")
+		dAIdx := ls.AddVariable("dA")
+		dBIdx := ls.AddVariable("dB")
+		dCIdx := ls.AddVariable("dC")
 
-	t.Logf("Successfully recovered 3 private keys and 2 nonces from 6 signatures!")
+		negR1 := new(big.Int).Neg(r1)
+		negR1.Mod(negR1, secp256k1N)
+		negR4 := new(big.Int).Neg(r4)
+		negR4.Mod(negR4, secp256k1N)
+
+		zs := make([]*big.Int, 6)
+		for i, msg := range msgs {
+			zs[i] = new(big.Int).SetBytes(msg)
+		}
+
+		// Add equations: s*k - r*d = z
+		ls.AddEquation(map[int]*big.Int{k1Idx: s1, dAIdx: negR1}, zs[0])
+		ls.AddEquation(map[int]*big.Int{k1Idx: s2, dAIdx: negR1}, zs[1])
+		ls.AddEquation(map[int]*big.Int{k1Idx: s3, dBIdx: negR1}, zs[2])
+		ls.AddEquation(map[int]*big.Int{k2Idx: s4, dBIdx: negR4}, zs[3])
+		ls.AddEquation(map[int]*big.Int{k2Idx: s5, dCIdx: negR4}, zs[4])
+		ls.AddEquation(map[int]*big.Int{k2Idx: s6, dCIdx: negR4}, zs[5])
+
+		if !ls.CanSolve() {
+			t.Fatalf("system should be solvable: %d eq, %d var",
+				ls.NumEquations(), ls.NumVariables())
+		}
+
+		solutions, err := ls.Solve()
+		if err != nil {
+			t.Fatalf("solve failed: %v", err)
+		}
+
+		// Verify all recovered values
+		if solutions["k1"].Cmp(k1) != 0 {
+			t.Fatalf("k1 mismatch")
+		}
+		if solutions["k2"].Cmp(k2) != 0 {
+			t.Fatalf("k2 mismatch")
+		}
+		if solutions["dA"].Cmp(privKeyA.D) != 0 {
+			t.Fatalf("dA mismatch")
+		}
+		if solutions["dB"].Cmp(privKeyB.D) != 0 {
+			t.Fatalf("dB mismatch")
+		}
+		if solutions["dC"].Cmp(privKeyC.D) != 0 {
+			t.Fatalf("dC mismatch")
+		}
+	})
+}
+
+// Property: Recovery fails with different R values
+func TestPropertyRecoveryFailsDifferentR(t *testing.T) {
+	rapid.Check(t, func(t *rapid.T) {
+		privKey := genPrivateKey(t)
+		k1 := genNonce(t)
+		k2 := genNonce(t)
+
+		// Ensure different nonces
+		if k1.Cmp(k2) == 0 {
+			k2.Add(k2, big.NewInt(1))
+			k2.Mod(k2, secp256k1N)
+		}
+
+		hash1 := genMessageHash(t)
+		hash2 := genMessageHash(t)
+
+		r1, s1 := signWithNonce(privKey, hash1, k1)
+		r2, s2 := signWithNonce(privKey, hash2, k2)
+
+		// Different nonces should produce different R values
+		if r1.Cmp(r2) == 0 {
+			t.Skip("rare collision")
+		}
+
+		z1 := new(big.Int).SetBytes(hash1)
+		z2 := new(big.Int).SetBytes(hash2)
+
+		_, err := RecoverFromSignatures(z1, r1, s1, z2, r2, s2)
+		if err == nil {
+			t.Fatalf("should fail with different R values")
+		}
+	})
+}
+
+// Property: Recovery fails with identical signatures
+func TestPropertyRecoveryFailsIdentical(t *testing.T) {
+	rapid.Check(t, func(t *rapid.T) {
+		privKey := genPrivateKey(t)
+		k := genNonce(t)
+		hash := genMessageHash(t)
+
+		r, s := signWithNonce(privKey, hash, k)
+		z := new(big.Int).SetBytes(hash)
+
+		_, err := RecoverFromSignatures(z, r, s, z, r, s)
+		if err == nil {
+			t.Fatalf("should fail with identical signatures")
+		}
+	})
+}
+
+// Property: VerifyPrivateKey correctly validates key-address pairs
+func TestPropertyVerifyPrivateKey(t *testing.T) {
+	rapid.Check(t, func(t *rapid.T) {
+		privKey := genPrivateKey(t)
+		privKeyHex := "0x" + hex.EncodeToString(crypto.FromECDSA(privKey))
+		expectedAddr := crypto.PubkeyToAddress(privKey.PublicKey).Hex()
+
+		// Should verify correctly
+		if !VerifyPrivateKey(privKeyHex, expectedAddr) {
+			t.Fatalf("should verify correct key-address pair")
+		}
+
+		// Should fail with wrong address
+		wrongAddr := "0x0000000000000000000000000000000000000000"
+		if VerifyPrivateKey(privKeyHex, wrongAddr) {
+			t.Fatalf("should reject wrong address")
+		}
+	})
+}
+
+// Property: GetAddressFromPrivateKey is consistent
+func TestPropertyGetAddress(t *testing.T) {
+	rapid.Check(t, func(t *rapid.T) {
+		privKey := genPrivateKey(t)
+		privKeyHex := "0x" + hex.EncodeToString(crypto.FromECDSA(privKey))
+		expectedAddr := crypto.PubkeyToAddress(privKey.PublicKey).Hex()
+
+		addr, err := GetAddressFromPrivateKey(privKeyHex)
+		if err != nil {
+			t.Fatalf("GetAddressFromPrivateKey failed: %v", err)
+		}
+
+		if addr != expectedAddr {
+			t.Fatalf("address mismatch: got %s, want %s", addr, expectedAddr)
+		}
+	})
+}
+
+// Property: Linear system correctly identifies underdetermined systems
+func TestPropertyLinearSystemUnderdetermined(t *testing.T) {
+	rapid.Check(t, func(t *rapid.T) {
+		numVars := rapid.IntRange(2, 5).Draw(t, "numVars")
+		numEqs := rapid.IntRange(1, numVars-1).Draw(t, "numEqs")
+
+		ls := NewLinearSystem(secp256k1N)
+
+		for i := 0; i < numVars; i++ {
+			ls.AddVariable(rapid.String().Draw(t, "varName"))
+		}
+
+		for i := 0; i < numEqs; i++ {
+			coeffs := make(map[int]*big.Int)
+			for j := 0; j < numVars; j++ {
+				coeffs[j] = big.NewInt(int64(rapid.IntRange(1, 1000).Draw(t, "coeff")))
+			}
+			ls.AddEquation(coeffs, big.NewInt(int64(rapid.IntRange(1, 1000).Draw(t, "const"))))
+		}
+
+		if ls.CanSolve() {
+			t.Fatalf("should not be solvable: %d equations, %d variables",
+				ls.NumEquations(), ls.NumVariables())
+		}
+
+		_, err := ls.Solve()
+		if err == nil {
+			t.Fatalf("should fail for underdetermined system")
+		}
+	})
 }
