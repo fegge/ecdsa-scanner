@@ -3,8 +3,13 @@ package api
 import (
 	"context"
 	"encoding/json"
+	"math/big"
 	"net/http"
+	"strings"
 	"time"
+
+	"github.com/ethereum/go-ethereum/common"
+	"github.com/ethereum/go-ethereum/ethclient"
 
 	"ecdsa-scanner/internal/config"
 	"ecdsa-scanner/internal/db"
@@ -41,17 +46,19 @@ type ChainHealth struct {
 
 // Handler holds HTTP handler dependencies
 type Handler struct {
-	scanner *scanner.Scanner
-	db      db.Database
-	logger  *logger.Logger
+	scanner    *scanner.Scanner
+	db         db.Database
+	logger     *logger.Logger
+	ankrAPIKey string
 }
 
 // NewHandler creates a new API handler
-func NewHandler(s *scanner.Scanner, database db.Database, log *logger.Logger) *Handler {
+func NewHandler(s *scanner.Scanner, database db.Database, log *logger.Logger, ankrAPIKey string) *Handler {
 	return &Handler{
-		scanner: s,
-		db:      database,
-		logger:  log,
+		scanner:    s,
+		db:         database,
+		logger:     log,
+		ankrAPIKey: ankrAPIKey,
 	}
 }
 
@@ -179,8 +186,15 @@ func (h *Handler) handleCollisions(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(enriched)
 }
 
+// RecoveredKeyWithBalance extends RecoveredKey with current balance
+type RecoveredKeyWithBalance struct {
+	db.RecoveredKey
+	BalanceWei string `json:"balance_wei"`
+	BalanceEth string `json:"balance_eth"`
+}
+
 func (h *Handler) handleRecoveredKeys(w http.ResponseWriter, r *http.Request) {
-	ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
+	ctx, cancel := context.WithTimeout(r.Context(), 30*time.Second)
 	defer cancel()
 
 	keys, err := h.db.GetRecoveredKeys(ctx)
@@ -190,15 +204,71 @@ func (h *Handler) handleRecoveredKeys(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Add chain names
-	for i := range keys {
-		if cfg := config.ChainByID(keys[i].ChainID); cfg != nil {
-			keys[i].ChainName = cfg.Name
+	// Enrich with chain names and balances
+	result := make([]RecoveredKeyWithBalance, len(keys))
+	for i, key := range keys {
+		if cfg := config.ChainByID(key.ChainID); cfg != nil {
+			key.ChainName = cfg.Name
+		}
+		result[i] = RecoveredKeyWithBalance{
+			RecoveredKey: key,
+			BalanceWei:   "0",
+			BalanceEth:   "0",
+		}
+
+		// Fetch balance from RPC
+		balance, err := h.getBalance(ctx, key.Address, key.ChainID)
+		if err == nil {
+			result[i].BalanceWei = balance.String()
+			result[i].BalanceEth = weiToEth(balance)
 		}
 	}
 
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(keys)
+	json.NewEncoder(w).Encode(result)
+}
+
+// getBalance fetches the current balance of an address
+func (h *Handler) getBalance(ctx context.Context, address string, chainID int) (*big.Int, error) {
+	cfg := config.ChainByID(chainID)
+	if cfg == nil {
+		return nil, nil
+	}
+
+	rpcURL := cfg.RPCURL
+	if h.ankrAPIKey != "" && strings.Contains(rpcURL, "ankr.com") {
+		rpcURL = rpcURL + "/" + h.ankrAPIKey
+	}
+
+	client, err := ethclient.DialContext(ctx, rpcURL)
+	if err != nil {
+		return nil, err
+	}
+	defer client.Close()
+
+	return client.BalanceAt(ctx, common.HexToAddress(address), nil)
+}
+
+// weiToEth converts wei to ETH as a string with 6 decimal places
+func weiToEth(wei *big.Int) string {
+	if wei == nil {
+		return "0"
+	}
+	// Convert to float: wei / 1e18
+	fWei := new(big.Float).SetInt(wei)
+	ethValue := new(big.Float).Quo(fWei, big.NewFloat(1e18))
+	
+	// Format with up to 6 decimal places, trim trailing zeros
+	text := ethValue.Text('f', 6)
+	// Trim trailing zeros after decimal point
+	if strings.Contains(text, ".") {
+		text = strings.TrimRight(text, "0")
+		text = strings.TrimRight(text, ".")
+	}
+	if text == "" {
+		return "0"
+	}
+	return text
 }
 
 func (h *Handler) handleRecoveredNonces(w http.ResponseWriter, r *http.Request) {

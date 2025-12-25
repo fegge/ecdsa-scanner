@@ -152,7 +152,26 @@
             padding: 20px;
             margin-bottom: 15px;
         }
-        .key-card h4 { color: #e74c3c; margin-bottom: 15px; }
+        .key-card h4 { color: #e74c3c; margin: 0; }
+        .key-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 15px;
+        }
+        .key-balance {
+            font-size: 1.1em;
+            font-weight: bold;
+            color: #888;
+            background: rgba(0,0,0,0.3);
+            padding: 8px 16px;
+            border-radius: 6px;
+        }
+        .key-balance.balance-positive {
+            color: #2ecc71;
+            background: rgba(46, 204, 113, 0.15);
+            border: 1px solid rgba(46, 204, 113, 0.3);
+        }
         .key-field { margin: 10px 0; }
         .key-field label { color: #888; font-size: 0.85em; display: block; margin-bottom: 4px; }
         .key-field .value {
@@ -538,9 +557,16 @@
 
                 list.innerHTML = keys.map(k => {
                     const explorer = explorers[k.chain_id] || '';
+                    const hasBalance = k.balance_eth && k.balance_eth !== '0';
+                    const balanceClass = hasBalance ? 'balance-positive' : '';
                     return `
                         <div class="key-card">
-                            <h4>${k.chain_name || 'Chain ' + k.chain_id} - Compromised Address</h4>
+                            <div class="key-header">
+                                <h4>${k.chain_name || 'Chain ' + k.chain_id} - Compromised Address</h4>
+                                <div class="key-balance ${balanceClass}">
+                                    ${k.balance_eth || '0'} ${getChainSymbol(k.chain_id)}
+                                </div>
+                            </div>
                             <div class="key-field">
                                 <label>Address</label>
                                 <div class="value">
@@ -566,6 +592,14 @@
             } catch (e) {
                 console.error('Keys error:', e);
             }
+        }
+
+        function getChainSymbol(chainId) {
+            const symbols = {
+                1: 'ETH', 56: 'BNB', 137: 'MATIC', 42161: 'ETH', 43114: 'AVAX',
+                250: 'FTM', 10: 'ETH', 8453: 'ETH', 324: 'ETH', 100: 'xDAI', 42220: 'CELO'
+            };
+            return symbols[chainId] || 'ETH';
         }
 
         async function fetchNonces() {
