@@ -1,0 +1,19 @@
+# Binary
+ecdsa-scanner
+
+# Environment
+.env
+
+# Database files
+*.db
+*.db-shm
+*.db-wal
+*.db-journal
+
+# IDE
+.idea/
+.vscode/
+*.swp
+
+# OS
+.DS_Store

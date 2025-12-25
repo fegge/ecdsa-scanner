@@ -1,0 +1,18 @@
+[Unit]
+Description=Multi-Chain ECDSA R-Value Scanner
+After=network.target
+
+[Service]
+Type=simple
+User=exedev
+Group=exedev
+WorkingDirectory=/home/exedev/ecdsa-scanner
+ExecStart=/home/exedev/ecdsa-scanner/ecdsa-scanner
+Restart=always
+RestartSec=5
+
+# Environment
+EnvironmentFile=/home/exedev/ecdsa-scanner/.env
+
+[Install]
+WantedBy=multi-user.target
