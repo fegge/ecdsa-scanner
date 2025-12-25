@@ -24,8 +24,8 @@ func NewMock() *MockDB {
 	}
 }
 
-// NewMockWithDemoData creates a mock database with sample data for demos
-func NewMockWithDemoData() *MockDB {
+// NewMockWithSampleData creates a mock database with sample data
+func NewMockWithSampleData() *MockDB {
 	m := NewMock()
 	
 	// Add sample recovered keys
