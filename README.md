@@ -26,7 +26,7 @@ This vulnerability has led to significant losses in cryptocurrency history, incl
 
 ## Features
 
-- **Multi-chain scanning**: Monitors 11 EVM chains simultaneously
+- **Multi-chain scanning**: Monitors 21 EVM chains simultaneously
 - **Real-time detection**: Continuous scanning with configurable rate limits
 - **Health monitoring**: Circuit breakers, retry logic, and comprehensive health dashboard
 - **Web UI**: Live statistics, chain status, and log viewer
@@ -219,6 +219,16 @@ journalctl -u ecdsa-scanner -f
 | zkSync Era | 324 | explorer.zksync.io |
 | Gnosis | 100 | gnosisscan.io |
 | Celo | 42220 | celoscan.io |
+| Linea | 59144 | lineascan.build |
+| Scroll | 534352 | scrollscan.com |
+| Mantle | 5000 | mantlescan.xyz |
+| Blast | 81457 | blastscan.io |
+| Arbitrum Nova | 42170 | nova.arbiscan.io |
+| Moonbeam | 1284 | moonscan.io |
+| Metis | 1088 | andromeda-explorer.metis.io |
+| Kaia | 8217 | kaiascan.io |
+| Harmony | 1666600000 | explorer.harmony.one |
+| IoTeX | 4689 | iotexscan.io |
 
 ## Architecture
 

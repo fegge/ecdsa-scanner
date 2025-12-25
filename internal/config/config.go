@@ -63,6 +63,7 @@ func Load() *Config {
 // DefaultChains returns the list of chains to scan
 func DefaultChains() []ChainConfig {
 	return []ChainConfig{
+		// Original chains
 		{Name: "Ethereum", ChainID: 1, RPCURL: "https://rpc.ankr.com/eth", ExplorerURL: "https://etherscan.io", Enabled: true},
 		{Name: "BSC", ChainID: 56, RPCURL: "https://rpc.ankr.com/bsc", ExplorerURL: "https://bscscan.com", Enabled: true},
 		{Name: "Polygon", ChainID: 137, RPCURL: "https://rpc.ankr.com/polygon", ExplorerURL: "https://polygonscan.com", Enabled: true},
@@ -74,6 +75,18 @@ func DefaultChains() []ChainConfig {
 		{Name: "zkSync", ChainID: 324, RPCURL: "https://rpc.ankr.com/zksync_era", ExplorerURL: "https://explorer.zksync.io", Enabled: true},
 		{Name: "Gnosis", ChainID: 100, RPCURL: "https://rpc.ankr.com/gnosis", ExplorerURL: "https://gnosisscan.io", Enabled: true},
 		{Name: "Celo", ChainID: 42220, RPCURL: "https://rpc.ankr.com/celo", ExplorerURL: "https://celoscan.io", Enabled: true},
+		// High priority L2s
+		{Name: "Linea", ChainID: 59144, RPCURL: "https://rpc.ankr.com/linea", ExplorerURL: "https://lineascan.build", Enabled: true},
+		{Name: "Scroll", ChainID: 534352, RPCURL: "https://rpc.ankr.com/scroll", ExplorerURL: "https://scrollscan.com", Enabled: true},
+		{Name: "Mantle", ChainID: 5000, RPCURL: "https://rpc.ankr.com/mantle", ExplorerURL: "https://mantlescan.xyz", Enabled: true},
+		{Name: "Blast", ChainID: 81457, RPCURL: "https://rpc.ankr.com/blast", ExplorerURL: "https://blastscan.io", Enabled: true},
+		{Name: "Arbitrum Nova", ChainID: 42170, RPCURL: "https://rpc.ankr.com/arbitrumnova", ExplorerURL: "https://nova.arbiscan.io", Enabled: true},
+		// Medium priority chains
+		{Name: "Moonbeam", ChainID: 1284, RPCURL: "https://rpc.ankr.com/moonbeam", ExplorerURL: "https://moonscan.io", Enabled: true},
+		{Name: "Metis", ChainID: 1088, RPCURL: "https://rpc.ankr.com/metis", ExplorerURL: "https://andromeda-explorer.metis.io", Enabled: true},
+		{Name: "Kaia", ChainID: 8217, RPCURL: "https://rpc.ankr.com/kaia", ExplorerURL: "https://kaiascan.io", Enabled: true},
+		{Name: "Harmony", ChainID: 1666600000, RPCURL: "https://rpc.ankr.com/harmony", ExplorerURL: "https://explorer.harmony.one", Enabled: true},
+		{Name: "IoTeX", ChainID: 4689, RPCURL: "https://rpc.ankr.com/iotex", ExplorerURL: "https://iotexscan.io", Enabled: true},
 	}
 }
 
