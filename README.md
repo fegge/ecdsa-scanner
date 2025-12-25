@@ -1,98 +1,188 @@
-# Multi-Chain ECDSA R-Value Scanner
+# ECDSA R-Value Scanner
 
-Scans multiple EVM chains for ECDSA signature nonce reuse vulnerabilities.
+A multi-chain scanner that detects ECDSA signature nonce reuse vulnerabilities across EVM-compatible blockchains.
 
 ## Overview
 
-This tool scans blockchain transactions looking for duplicate R values in ECDSA signatures. Reusing the same R value (nonce) across different transactions can allow an attacker to recover the private key.
+This tool scans blockchain transactions looking for duplicate R values in ECDSA signatures. Reusing the same R value (nonce) across different transactions allows an attacker to recover the private key using simple algebra.
+
+### Why This Matters
+
+ECDSA signatures consist of two values: `r` and `s`. The `r` value is derived from a random nonce `k`. If the same nonce is used twice with the same private key, the private key can be calculated as:
+
+```
+private_key = (s1 - s2)^(-1) * (z1 - z2) mod n
+```
+
+This vulnerability has led to significant losses in cryptocurrency history, including the 2013 Android Bitcoin wallet vulnerability.
 
 ### Types of Duplicates Detected
 
-- **Same Key Duplicates**: Same R value from the same address (critical - key is compromised)
-- **Cross-Key Duplicates**: Same R value from different addresses on the same chain
-- **Cross-Chain Duplicates**: Same R value appearing on different chains
+| Type | Description | Severity |
+|------|-------------|----------|
+| **Same Key** | Same R value from the same address | Critical - private key compromised |
+| **Cross-Key** | Same R value from different addresses on same chain | Suspicious - potential weak RNG |
+| **Cross-Chain** | Same R value appearing on different chains | Notable - may indicate key reuse |
+
+## Features
+
+- **Multi-chain scanning**: Monitors 11 EVM chains simultaneously
+- **Real-time detection**: Continuous scanning with configurable rate limits
+- **Health monitoring**: Circuit breakers, retry logic, and comprehensive health dashboard
+- **Web UI**: Live statistics, chain status, and log viewer
+- **Robust error handling**: Automatic reconnection and graceful degradation
 
 ## Project Structure
 
 ```
-├── cmd/scanner/       # Application entry point
+ecdsa-scanner/
+├── cmd/scanner/          # Application entry point
 ├── internal/
-│   ├── api/          # HTTP API handlers
-│   ├── config/       # Configuration and chain definitions
-│   ├── db/           # Database operations (PostgreSQL)
-│   ├── logger/       # Logging with ring buffer
-│   └── scanner/      # Chain scanning logic
-├── static/           # Web UI
-└── .env.example      # Environment configuration template
+│   ├── api/              # HTTP API handlers
+│   ├── config/           # Configuration and chain definitions
+│   ├── db/               # PostgreSQL database layer
+│   ├── logger/           # Logging with ring buffer for UI
+│   ├── retry/            # Retry logic and circuit breaker
+│   └── scanner/          # Chain scanning logic
+├── static/               # Web UI (single-page app)
+├── .env.example          # Environment configuration template
+└── ecdsa-scanner.service # Systemd service file
 ```
 
 ## Requirements
 
 - Go 1.23+
-- PostgreSQL database
+- PostgreSQL 14+ (or compatible: Neon, Supabase, AWS RDS)
+
+## Quick Start
+
+### 1. Clone and build
+
+```bash
+git clone https://github.com/fegge/ecdsa-scanner.git
+cd ecdsa-scanner
+go build -o ecdsa-scanner ./cmd/scanner/
+```
+
+### 2. Configure
+
+```bash
+cp .env.example .env
+# Edit .env with your database URL
+```
+
+### 3. Run
+
+```bash
+source .env && ./ecdsa-scanner
+```
+
+Open http://localhost:8000 to view the dashboard.
 
 ## Configuration
 
-Copy `.env.example` to `.env` and configure:
+| Variable | Required | Description |
+|----------|----------|-------------|
+| `DATABASE_URL` | Yes* | PostgreSQL connection string |
+| `ANKR_API_KEY` | No | Ankr API key for higher rate limits |
+| `PORT` | No | HTTP server port (default: 8000) |
+| `BIND_ADDRS` | No | Bind addresses, comma-separated (default: 0.0.0.0) |
+
+*If not set, runs in demo mode without persistence.
+
+### Example `.env`
 
 ```bash
-# Required: PostgreSQL connection string
-DATABASE_URL=postgres://user:password@host:5432/dbname?sslmode=require
-
-# Optional: Ankr API key for higher rate limits
-ANKR_API_KEY=your-api-key
-
-# Server settings
+DATABASE_URL=postgres://user:password@host:5432/ecdsa_scanner?sslmode=require
+ANKR_API_KEY=your-api-key-here
 PORT=8000
 BIND_ADDRS=127.0.0.1
 ```
 
-## Building
+## Deployment
+
+### Systemd Service
 
 ```bash
-go build -o bsc-scanner ./cmd/scanner/
-```
-
-## Running
-
-```bash
-# With .env file
-source .env && ./bsc-scanner
-
-# Or with environment variables
-DATABASE_URL=postgres://... ./bsc-scanner
-```
-
-## Systemd Service
-
-```bash
-sudo cp bsc-scanner.service /etc/systemd/system/
+# Copy and configure service file
+sudo cp ecdsa-scanner.service /etc/systemd/system/
 sudo systemctl daemon-reload
-sudo systemctl enable bsc-scanner
-sudo systemctl start bsc-scanner
+sudo systemctl enable ecdsa-scanner
+sudo systemctl start ecdsa-scanner
+
+# View logs
+journalctl -u ecdsa-scanner -f
 ```
 
-## API Endpoints
+## API Reference
 
-- `GET /` - Web UI
-- `GET /api/stats` - Scanner statistics
-- `GET /api/duplicates` - All duplicate R values
-- `GET /api/duplicates/same-key` - Same key duplicates only
-- `GET /api/duplicates/cross-key` - Cross-key duplicates only
-- `GET /api/logs` - Recent log entries
-- `POST /api/start` - Start scanning (optional `?chain=` param)
-- `POST /api/stop` - Stop scanning (optional `?chain=` param)
+### Endpoints
+
+| Method | Path | Description |
+|--------|------|-------------|
+| GET | `/` | Web UI dashboard |
+| GET | `/api/stats` | Scanner statistics and chain status |
+| GET | `/api/health` | System health check |
+| GET | `/api/duplicates` | All duplicate R values found |
+| GET | `/api/duplicates/same-key` | Same-key duplicates only |
+| GET | `/api/duplicates/cross-key` | Cross-key duplicates only |
+| GET | `/api/logs` | Recent log entries |
+| POST | `/api/start` | Start scanning (optional `?chain=NAME`) |
+| POST | `/api/stop` | Stop scanning (optional `?chain=NAME`) |
+
+### Health Response
+
+```json
+{
+  "status": "healthy",
+  "database": {
+    "connected": true,
+    "latency_ms": 12,
+    "open_connections": 5
+  },
+  "chains": [
+    {"name": "Ethereum", "running": true, "circuit_open": false, "error_count": 0}
+  ]
+}
+```
 
 ## Supported Chains
 
-- Ethereum
-- BSC (Binance Smart Chain)
-- Polygon
-- Arbitrum
-- Avalanche
-- Fantom
-- Optimism
-- Base
-- zkSync Era
-- Gnosis
-- Celo
+| Chain | Chain ID | Explorer |
+|-------|----------|----------|
+| Ethereum | 1 | etherscan.io |
+| BSC | 56 | bscscan.com |
+| Polygon | 137 | polygonscan.com |
+| Arbitrum | 42161 | arbiscan.io |
+| Avalanche | 43114 | snowtrace.io |
+| Fantom | 250 | ftmscan.com |
+| Optimism | 10 | optimistic.etherscan.io |
+| Base | 8453 | basescan.org |
+| zkSync Era | 324 | explorer.zksync.io |
+| Gnosis | 100 | gnosisscan.io |
+| Celo | 42220 | celoscan.io |
+
+## Architecture
+
+### Error Handling
+
+- **Retry with exponential backoff**: Transient failures (timeouts, rate limits) are retried up to 3 times
+- **Circuit breaker**: After 5 consecutive failures, a chain is paused for 60 seconds
+- **Automatic reconnection**: RPC connections are re-established after persistent failures
+- **Graceful degradation**: Individual chain failures don't affect other chains
+
+### Database
+
+- Uses PostgreSQL for reliable storage and concurrent access
+- Batch inserts (1000 signatures per batch) to minimize write overhead
+- Indexed queries for efficient duplicate detection
+
+## Testing
+
+```bash
+go test ./...
+```
+
+## License
+
+MIT
