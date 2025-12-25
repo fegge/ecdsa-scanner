@@ -24,6 +24,69 @@ func NewMock() *MockDB {
 	}
 }
 
+// NewMockWithDemoData creates a mock database with sample data for demos
+func NewMockWithDemoData() *MockDB {
+	m := NewMock()
+	
+	// Add sample recovered keys
+	m.keys = []RecoveredKey{
+		{
+			ID:         1,
+			Address:    "0x742d35cc6634c0532925a3b844bc9e7595f8b2d1",
+			PrivateKey: "0x4c0883a69102937d6231471b5dbb6204fe5129617082792ae468d01a3f362318",
+			ChainID:    1,
+			RValues:    []string{"0x8a2d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0c1d2e3f4a5b6c7d8e9f0a1b2c3d4"},
+			TxHashes:   []string{"0x1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef", "0xfedcba0987654321fedcba0987654321fedcba0987654321fedcba0987654321"},
+			CreatedAt:  "2024-12-25T10:30:00Z",
+		},
+		{
+			ID:         2,
+			Address:    "0x8ba1f109551bd432803012645ac136ddd64dba72",
+			PrivateKey: "0x2a871d0798f97d79848a013d4936a73bf4cc922c825d33c1cf7073dff6d409c6",
+			ChainID:    137,
+			RValues:    []string{"0x1a2b3c4d5e6f7a8b9c0d1e2f3a4b5c6d7e8f9a0b1c2d3e4f5a6b7c8d9e0f1a2b"},
+			TxHashes:   []string{"0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"},
+			CreatedAt:  "2024-12-24T15:45:00Z",
+		},
+	}
+	
+	// Add sample recovered nonces (for cross-key recovery)
+	m.nonces = map[string]RecoveredNonce{
+		"0x8a2d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0c1d2e3f4a5b6c7d8e9f0a1b2c3d4": {
+			RValue:           "0x8a2d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0c1d2e3f4a5b6c7d8e9f0a1b2c3d4",
+			KValue:           "0x7f6e5d4c3b2a19087f6e5d4c3b2a19087f6e5d4c3b2a19087f6e5d4c3b2a1908",
+			DerivedFromKeyID: 1,
+		},
+	}
+	
+	// Add sample collisions
+	m.rValues = map[string]TxRef{
+		"0x8a2d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0c1d2e3f4a5b6c7d8e9f0a1b2c3d4": {
+			TxHash:  "0x1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef",
+			ChainID: 1,
+		},
+		"0x1a2b3c4d5e6f7a8b9c0d1e2f3a4b5c6d7e8f9a0b1c2d3e4f5a6b7c8d9e0f1a2b": {
+			TxHash:  "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+			ChainID: 137,
+		},
+	}
+	
+	// Add a pending component (cross-key collision not yet solvable)
+	m.comps = []PendingComponent{
+		{
+			ID:        1,
+			RValues:   []string{"0x9f8e7d6c5b4a3928171605f4e3d2c1b0a9f8e7d6c5b4a3928171605f4e3d2c1b"},
+			TxHashes:  []string{"0xcccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc", "0xdddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"},
+			Addresses: []string{"0x1111111111111111111111111111111111111111", "0x2222222222222222222222222222222222222222"},
+			ChainIDs:  []int{1, 1},
+			Equations: 2,
+			Unknowns:  3,
+		},
+	}
+	
+	return m
+}
+
 func (m *MockDB) Close() error { return nil }
 
 func (m *MockDB) Health(ctx context.Context) HealthStatus {
@@ -55,7 +118,18 @@ func (m *MockDB) GetCollisionTxRefs(ctx context.Context, rValue string) ([]TxRef
 }
 
 func (m *MockDB) GetAllCollisions(ctx context.Context) ([]Collision, error) {
-	return []Collision{}, nil
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	
+	// Build collisions from rValues that have been recorded
+	collisions := []Collision{}
+	for rValue, ref := range m.rValues {
+		collisions = append(collisions, Collision{
+			RValue: rValue,
+			TxRefs: []TxRef{ref},
+		})
+	}
+	return collisions, nil
 }
 
 func (m *MockDB) HasCrossKeyPotential(ctx context.Context, rValue, excludeAddress string) (bool, error) {

@@ -29,7 +29,7 @@ func main() {
 
 	if cfg.DatabaseURL == "" {
 		appLogger.Warn("DATABASE_URL not set - running in demo mode")
-		database = db.NewMock()
+		database = db.NewMockWithDemoData()
 	} else {
 		database, err = db.New(cfg.DatabaseURL)
 		if err != nil {
