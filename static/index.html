@@ -170,7 +170,7 @@
             padding: 15px;
             font-family: monospace;
             font-size: 0.85em;
-            max-height: 500px;
+            max-height: 400px;
             overflow-y: auto;
         }
         .log-entry { padding: 4px 0; border-bottom: 1px solid rgba(255,255,255,0.05); }
@@ -179,6 +179,96 @@
         .log-level.INFO { background: rgba(52, 152, 219, 0.3); color: #3498db; }
         .log-level.WARN { background: rgba(243, 156, 18, 0.3); color: #f39c12; }
         .log-level.ERROR { background: rgba(231, 76, 60, 0.3); color: #e74c3c; }
+        
+        .overall-status {
+            text-align: center;
+            padding: 20px;
+            border-radius: 8px;
+            margin-bottom: 20px;
+        }
+        .overall-status.healthy {
+            background: rgba(46, 204, 113, 0.15);
+            border: 1px solid rgba(46, 204, 113, 0.3);
+        }
+        .overall-status.healthy h2 { color: #2ecc71; }
+        .overall-status.unhealthy {
+            background: rgba(231, 76, 60, 0.15);
+            border: 1px solid rgba(231, 76, 60, 0.3);
+        }
+        .overall-status.unhealthy h2 { color: #e74c3c; }
+        .overall-status.degraded {
+            background: rgba(243, 156, 18, 0.15);
+            border: 1px solid rgba(243, 156, 18, 0.3);
+        }
+        .overall-status.degraded h2 { color: #f39c12; }
+        .overall-status p { color: #aaa; margin-top: 5px; }
+        
+        .health-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+            gap: 20px;
+            margin-bottom: 20px;
+        }
+        .health-card {
+            background: rgba(0,0,0,0.3);
+            border-radius: 8px;
+            padding: 20px;
+        }
+        .health-card h3 {
+            color: #f0b90b;
+            margin-bottom: 15px;
+            display: flex;
+            align-items: center;
+            gap: 10px;
+        }
+        .health-status {
+            display: inline-block;
+            width: 12px;
+            height: 12px;
+            border-radius: 50%;
+            background: #2ecc71;
+        }
+        .health-status.unhealthy { background: #e74c3c; }
+        .health-status.warning { background: #f39c12; }
+        .health-metric {
+            display: flex;
+            justify-content: space-between;
+            padding: 8px 0;
+            border-bottom: 1px solid rgba(255,255,255,0.05);
+        }
+        .health-metric:last-child { border-bottom: none; }
+        .health-metric-label { color: #aaa; }
+        .health-metric-value { color: #fff; font-weight: bold; }
+        .health-metric-value.good { color: #2ecc71; }
+        .health-metric-value.warning { color: #f39c12; }
+        .health-metric-value.bad { color: #e74c3c; }
+        
+        .chain-health-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+            gap: 10px;
+        }
+        .chain-health-item {
+            background: rgba(255,255,255,0.05);
+            border-radius: 6px;
+            padding: 12px;
+        }
+        .chain-health-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 5px;
+        }
+        .chain-health-name { font-weight: bold; }
+        .chain-health-status {
+            font-size: 0.75em;
+            padding: 2px 8px;
+            border-radius: 4px;
+        }
+        .chain-health-status.healthy { background: rgba(46, 204, 113, 0.2); color: #2ecc71; }
+        .chain-health-status.stopped { background: rgba(255, 255, 255, 0.1); color: #888; }
+        .chain-health-status.error { background: rgba(231, 76, 60, 0.2); color: #e74c3c; }
+        .chain-health-details { font-size: 0.8em; color: #888; }
         
         .spinner {
             display: inline-block;
@@ -223,7 +313,7 @@
         <div class="main-tabs">
             <button class="main-tab active" onclick="showTab('scanner')">Scanner</button>
             <button class="main-tab" onclick="showTab('recovery')">Recovery</button>
-            <button class="main-tab" onclick="showTab('logs')">Logs</button>
+            <button class="main-tab" onclick="showTab('health')">Health</button>
         </div>
 
         <div id="scannerTab" class="tab-content active">
@@ -268,7 +358,59 @@
             </div>
         </div>
 
-        <div id="logsTab" class="tab-content">
+        <div id="healthTab" class="tab-content">
+            <div id="overallStatus" class="overall-status healthy">
+                <h2>System Healthy</h2>
+                <p>All systems operational</p>
+            </div>
+
+            <div class="health-grid">
+                <div class="health-card">
+                    <h3><span class="health-status" id="dbHealthStatus"></span> Database</h3>
+                    <div class="health-metric">
+                        <span class="health-metric-label">Connection</span>
+                        <span class="health-metric-value" id="dbConnected">-</span>
+                    </div>
+                    <div class="health-metric">
+                        <span class="health-metric-label">Latency</span>
+                        <span class="health-metric-value" id="dbLatency">-</span>
+                    </div>
+                    <div class="health-metric">
+                        <span class="health-metric-label">Open Connections</span>
+                        <span class="health-metric-value" id="dbConnections">-</span>
+                    </div>
+                </div>
+
+                <div class="health-card">
+                    <h3><span class="health-status" id="scannerHealthStatus"></span> Scanner</h3>
+                    <div class="health-metric">
+                        <span class="health-metric-label">Active Chains</span>
+                        <span class="health-metric-value" id="activeChains">-</span>
+                    </div>
+                    <div class="health-metric">
+                        <span class="health-metric-label">Total Errors</span>
+                        <span class="health-metric-value" id="totalErrors">-</span>
+                    </div>
+                </div>
+
+                <div class="health-card">
+                    <h3><span class="health-status" id="throughputHealthStatus"></span> Throughput</h3>
+                    <div class="health-metric">
+                        <span class="health-metric-label">R-Values Indexed</span>
+                        <span class="health-metric-value" id="healthTotalRValues">-</span>
+                    </div>
+                    <div class="health-metric">
+                        <span class="health-metric-label">Blocks Behind (Total)</span>
+                        <span class="health-metric-value" id="totalBlocksBehind">-</span>
+                    </div>
+                </div>
+            </div>
+
+            <div class="section">
+                <h2>Chain Health Status</h2>
+                <div class="chain-health-grid" id="chainHealthGrid"></div>
+            </div>
+
             <div class="section">
                 <h2>System Logs</h2>
                 <div class="log-container" id="logContainer"></div>
@@ -302,7 +444,7 @@
             document.getElementById(name + 'Tab').classList.add('active');
             
             if (name === 'recovery') fetchRecoveryData();
-            if (name === 'logs') fetchLogs();
+            if (name === 'health') fetchHealthData();
         }
 
         async function fetchStats() {
@@ -493,6 +635,125 @@
             }
         }
 
+        async function fetchHealthData() {
+            await Promise.all([fetchHealth(), fetchLogs()]);
+        }
+
+        async function fetchHealth() {
+            try {
+                const [healthResp, statsResp] = await Promise.all([
+                    fetch('/api/health'),
+                    fetch('/api/stats')
+                ]);
+                const health = await healthResp.json();
+                const stats = await statsResp.json();
+
+                // Database health
+                const dbStatus = document.getElementById('dbHealthStatus');
+                const dbConnected = document.getElementById('dbConnected');
+                const dbLatency = document.getElementById('dbLatency');
+                const dbConnections = document.getElementById('dbConnections');
+
+                if (health.database?.connected) {
+                    dbStatus.className = 'health-status';
+                    dbConnected.textContent = 'Connected';
+                    dbConnected.className = 'health-metric-value good';
+                } else {
+                    dbStatus.className = 'health-status unhealthy';
+                    dbConnected.textContent = 'Disconnected';
+                    dbConnected.className = 'health-metric-value bad';
+                }
+
+                const latency = health.database?.latency_ms || 0;
+                dbLatency.textContent = latency + ' ms';
+                dbLatency.className = latency < 50 ? 'health-metric-value good' : 
+                                      latency < 200 ? 'health-metric-value warning' : 'health-metric-value bad';
+                dbConnections.textContent = health.database?.open_connections || 0;
+
+                // Scanner health
+                const scannerStatus = document.getElementById('scannerHealthStatus');
+                const activeChains = document.getElementById('activeChains');
+                const totalErrors = document.getElementById('totalErrors');
+
+                const chains = health.chains || [];
+                const runningCount = chains.filter(c => c.running).length;
+                const totalErrorCount = chains.reduce((sum, c) => sum + (c.error_count || 0), 0);
+
+                activeChains.textContent = `${runningCount} / ${chains.length}`;
+                totalErrors.textContent = totalErrorCount;
+                totalErrors.className = totalErrorCount > 100 ? 'health-metric-value bad' :
+                                        totalErrorCount > 10 ? 'health-metric-value warning' : 'health-metric-value good';
+
+                scannerStatus.className = runningCount === 0 ? 'health-status unhealthy' :
+                                          totalErrorCount > 50 ? 'health-status warning' : 'health-status';
+
+                // Throughput
+                const throughputStatus = document.getElementById('throughputHealthStatus');
+                const healthTotalRValues = document.getElementById('healthTotalRValues');
+                const totalBlocksBehind = document.getElementById('totalBlocksBehind');
+
+                healthTotalRValues.textContent = formatNumber(stats.total_r_values);
+
+                let blocksBehind = 0;
+                if (stats.chains) {
+                    blocksBehind = stats.chains.reduce((sum, c) => sum + Math.max(0, (c.latest_block || 0) - (c.current_block || 0)), 0);
+                }
+                totalBlocksBehind.textContent = formatNumber(blocksBehind);
+                totalBlocksBehind.className = blocksBehind > 10000 ? 'health-metric-value bad' :
+                                              blocksBehind > 1000 ? 'health-metric-value warning' : 'health-metric-value good';
+                throughputStatus.className = blocksBehind > 10000 ? 'health-status warning' : 'health-status';
+
+                // Chain health grid
+                const chainHealthGrid = document.getElementById('chainHealthGrid');
+                chainHealthGrid.innerHTML = chains.map(chain => {
+                    const chainStats = stats.chains?.find(c => c.chain === chain.name) || {};
+                    const behind = Math.max(0, (chainStats.latest_block || 0) - (chainStats.current_block || 0));
+                    let statusClass = 'healthy';
+                    let statusText = 'Healthy';
+                    if (!chain.running) {
+                        statusClass = 'stopped';
+                        statusText = 'Stopped';
+                    } else if (chain.error_count > 10) {
+                        statusClass = 'error';
+                        statusText = 'Errors';
+                    }
+
+                    return `
+                        <div class="chain-health-item">
+                            <div class="chain-health-header">
+                                <span class="chain-health-name">${chain.name}</span>
+                                <span class="chain-health-status ${statusClass}">${statusText}</span>
+                            </div>
+                            <div class="chain-health-details">
+                                Errors: ${chain.error_count || 0} | Behind: ${formatNumber(behind)}
+                            </div>
+                        </div>
+                    `;
+                }).join('');
+
+                // Overall status
+                const overallStatus = document.getElementById('overallStatus');
+                const dbHealthy = health.database?.connected;
+                const scannersHealthy = runningCount > 0 && totalErrorCount < 100;
+
+                if (!dbHealthy) {
+                    overallStatus.className = 'overall-status unhealthy';
+                    overallStatus.innerHTML = '<h2>System Unhealthy</h2><p>Database connection failed</p>';
+                } else if (!scannersHealthy) {
+                    overallStatus.className = 'overall-status degraded';
+                    const issues = [];
+                    if (runningCount === 0) issues.push('No chains running');
+                    if (totalErrorCount >= 100) issues.push('High error count');
+                    overallStatus.innerHTML = `<h2>System Degraded</h2><p>${issues.join(', ')}</p>`;
+                } else {
+                    overallStatus.className = 'overall-status healthy';
+                    overallStatus.innerHTML = '<h2>System Healthy</h2><p>All systems operational</p>';
+                }
+            } catch (e) {
+                console.error('Health error:', e);
+            }
+        }
+
         async function fetchLogs() {
             try {
                 const resp = await fetch('/api/logs');
@@ -538,7 +799,7 @@
         setInterval(() => {
             const active = document.querySelector('.tab-content.active');
             if (active?.id === 'recoveryTab') fetchRecoveryData();
-            if (active?.id === 'logsTab') fetchLogs();
+            if (active?.id === 'healthTab') fetchHealthData();
         }, 5000);
     </script>
 </body>
