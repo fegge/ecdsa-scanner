@@ -34,6 +34,11 @@ func (m *MockDB) InsertSignatures(ctx context.Context, sigs []Signature) error {
 	return nil
 }
 
+// InsertSignaturesAndFindDuplicates is a no-op for mock
+func (m *MockDB) InsertSignaturesAndFindDuplicates(ctx context.Context, sigs []Signature) ([]DuplicateR, error) {
+	return nil, nil
+}
+
 // GetLastBlock returns 0 for mock
 func (m *MockDB) GetLastBlock(ctx context.Context, chain string) (uint64, error) {
 	return 0, nil
@@ -57,4 +62,29 @@ func (m *MockDB) GetStats(ctx context.Context) (*Stats, error) {
 // FindDuplicates returns empty list for mock
 func (m *MockDB) FindDuplicates(ctx context.Context) ([]DuplicateR, error) {
 	return nil, nil
+}
+
+// SaveRecoveredKey is a no-op for mock
+func (m *MockDB) SaveRecoveredKey(ctx context.Context, key *RecoveredKey) error {
+	return nil
+}
+
+// GetRecoveredKeys returns empty list for mock
+func (m *MockDB) GetRecoveredKeys(ctx context.Context) ([]RecoveredKey, error) {
+	return nil, nil
+}
+
+// GetRecoveredKeyCount returns 0 for mock
+func (m *MockDB) GetRecoveredKeyCount(ctx context.Context) (int, error) {
+	return 0, nil
+}
+
+// GetSameKeyDuplicatesForRecovery returns empty list for mock
+func (m *MockDB) GetSameKeyDuplicatesForRecovery(ctx context.Context) ([]DuplicateR, error) {
+	return nil, nil
+}
+
+// IsKeyRecovered returns false for mock
+func (m *MockDB) IsKeyRecovered(ctx context.Context, address, chain string) (bool, error) {
+	return false, nil
 }

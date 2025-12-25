@@ -4,10 +4,13 @@ import (
 	"context"
 	"encoding/json"
 	"net/http"
+	"strings"
 	"time"
 
+	"ecdsa-scanner/internal/config"
 	"ecdsa-scanner/internal/db"
 	"ecdsa-scanner/internal/logger"
+	"ecdsa-scanner/internal/recovery"
 	"ecdsa-scanner/internal/scanner"
 )
 
@@ -19,8 +22,10 @@ type GlobalStats struct {
 	DuplicateSameKey    int                  `json:"duplicate_same_key"`
 	DuplicateCrossKey   int                  `json:"duplicate_cross_key"`
 	DuplicateCrossChain int                  `json:"duplicate_cross_chain"`
+	RecoveredKeys       int                  `json:"recovered_keys"`
 	DatabaseHealthy     bool                 `json:"database_healthy"`
 	WriteErrors         int                  `json:"write_errors"`
+	AutoRecovery        bool                 `json:"auto_recovery"`
 }
 
 // HealthResponse represents the health check response
@@ -40,17 +45,19 @@ type ChainHealth struct {
 
 // Handler holds dependencies for HTTP handlers
 type Handler struct {
-	scanner *scanner.Scanner
-	db      db.Database
-	logger  *logger.Logger
+	scanner    *scanner.Scanner
+	db         db.Database
+	logger     *logger.Logger
+	ankrAPIKey string
 }
 
 // NewHandler creates a new API handler
-func NewHandler(s *scanner.Scanner, database db.Database, log *logger.Logger) *Handler {
+func NewHandler(s *scanner.Scanner, database db.Database, log *logger.Logger, ankrAPIKey string) *Handler {
 	return &Handler{
-		scanner: s,
-		db:      database,
-		logger:  log,
+		scanner:    s,
+		db:         database,
+		logger:     log,
+		ankrAPIKey: ankrAPIKey,
 	}
 }
 
@@ -62,6 +69,9 @@ func (h *Handler) RegisterRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/api/duplicates", h.handleDuplicates)
 	mux.HandleFunc("/api/duplicates/same-key", h.handleDuplicatesSameKey)
 	mux.HandleFunc("/api/duplicates/cross-key", h.handleDuplicatesCrossKey)
+	mux.HandleFunc("/api/recovered-keys", h.handleRecoveredKeys)
+	mux.HandleFunc("/api/recover", h.handleRecover)
+	mux.HandleFunc("/api/recovery/toggle", h.handleRecoveryToggle)
 	mux.HandleFunc("/api/start", h.handleStart)
 	mux.HandleFunc("/api/stop", h.handleStop)
 	mux.HandleFunc("/api/logs", h.handleLogs)
@@ -115,6 +125,7 @@ func (h *Handler) handleStats(w http.ResponseWriter, r *http.Request) {
 		TotalTxScanned:  h.scanner.GetTotalTxScanned(),
 		WriteErrors:     h.scanner.GetWriteErrors(),
 		DatabaseHealthy: true,
+		AutoRecovery:    h.scanner.IsRecoveryEnabled(),
 	}
 
 	if err != nil {
@@ -127,6 +138,7 @@ func (h *Handler) handleStats(w http.ResponseWriter, r *http.Request) {
 		stats.DuplicateSameKey = dbStats.DuplicateSameKey
 		stats.DuplicateCrossKey = dbStats.DuplicateCrossKey
 		stats.DuplicateCrossChain = dbStats.DuplicateCrossChain
+		stats.RecoveredKeys = dbStats.RecoveredKeys
 		stats.DatabaseHealthy = dbStats.Healthy
 	}
 
@@ -234,4 +246,144 @@ func (h *Handler) handleStop(w http.ResponseWriter, r *http.Request) {
 func (h *Handler) handleLogs(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(h.logger.GetEntries())
+}
+
+func (h *Handler) handleRecoveredKeys(w http.ResponseWriter, r *http.Request) {
+	ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
+	defer cancel()
+
+	keys, err := h.db.GetRecoveredKeys(ctx)
+	if err != nil {
+		h.logger.Error("Failed to get recovered keys: %v", err)
+		http.Error(w, "Database error: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(keys)
+}
+
+func (h *Handler) handleRecover(w http.ResponseWriter, r *http.Request) {
+	if r.Method != "POST" {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	ctx, cancel := context.WithTimeout(r.Context(), 60*time.Second)
+	defer cancel()
+
+	// Get same-key duplicates that haven't been recovered yet
+	duplicates, err := h.db.GetSameKeyDuplicatesForRecovery(ctx)
+	if err != nil {
+		h.logger.Error("Failed to get duplicates for recovery: %v", err)
+		http.Error(w, "Database error: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	if len(duplicates) == 0 {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"status":    "no_duplicates",
+			"message":   "No same-key duplicates found for recovery",
+			"recovered": 0,
+		})
+		return
+	}
+
+	// Try to recover keys
+	var recovered int
+	var errors []string
+
+	for _, dup := range duplicates {
+		if len(dup.Entries) < 2 {
+			continue
+		}
+
+		chain := dup.Entries[0].Chain
+		rpcURL := h.getRPCURL(chain)
+		if rpcURL == "" {
+			errors = append(errors, "No RPC URL for chain: "+chain)
+			continue
+		}
+
+		h.logger.Info("Attempting key recovery for address %s on %s", dup.Entries[0].Address, chain)
+
+		recoveredKey, err := recovery.RecoverPrivateKey(ctx, rpcURL, dup.Entries[0].TxHash, dup.Entries[1].TxHash)
+		if err != nil {
+			errMsg := "Recovery failed for " + dup.Entries[0].Address + ": " + err.Error()
+			h.logger.Warn("%s", errMsg)
+			errors = append(errors, errMsg)
+			continue
+		}
+
+		recoveredKey.Chain = chain
+
+		// Save to database
+		dbKey := &db.RecoveredKey{
+			Address:    recoveredKey.Address,
+			PrivateKey: recoveredKey.PrivateKey,
+			Chain:      recoveredKey.Chain,
+			RValue:     recoveredKey.RValue,
+			TxHash1:    recoveredKey.TxHash1,
+			TxHash2:    recoveredKey.TxHash2,
+		}
+
+		if err := h.db.SaveRecoveredKey(ctx, dbKey); err != nil {
+			h.logger.Error("Failed to save recovered key: %v", err)
+			errors = append(errors, "Failed to save key for "+recoveredKey.Address)
+			continue
+		}
+
+		h.logger.Info("Successfully recovered private key for %s on %s", recoveredKey.Address, chain)
+		recovered++
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"status":    "completed",
+		"recovered": recovered,
+		"attempted": len(duplicates),
+		"errors":    errors,
+	})
+}
+
+func (h *Handler) handleRecoveryToggle(w http.ResponseWriter, r *http.Request) {
+	if r.Method != "POST" {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	enabled := r.URL.Query().Get("enabled")
+	if enabled == "" {
+		// Toggle current state
+		current := h.scanner.IsRecoveryEnabled()
+		h.scanner.SetRecoveryEnabled(!current)
+		h.logger.Info("Auto-recovery toggled to %v", !current)
+	} else if enabled == "true" || enabled == "1" {
+		h.scanner.SetRecoveryEnabled(true)
+		h.logger.Info("Auto-recovery enabled")
+	} else {
+		h.scanner.SetRecoveryEnabled(false)
+		h.logger.Info("Auto-recovery disabled")
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"status":        "ok",
+		"auto_recovery": h.scanner.IsRecoveryEnabled(),
+	})
+}
+
+func (h *Handler) getRPCURL(chainName string) string {
+	// Get RPC URL from config
+	for _, chain := range config.DefaultChains() {
+		if chain.Name == chainName {
+			rpcURL := chain.RPCURL
+			if h.ankrAPIKey != "" && strings.Contains(rpcURL, "ankr.com") {
+				rpcURL = rpcURL + "/" + h.ankrAPIKey
+			}
+			return rpcURL
+		}
+	}
+	return ""
 }

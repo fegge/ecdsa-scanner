@@ -435,6 +435,78 @@
             background: rgba(231, 76, 60, 0.3);
             color: #e74c3c;
         }
+        .key-card {
+            background: rgba(231, 76, 60, 0.1);
+            border: 1px solid rgba(231, 76, 60, 0.3);
+            border-radius: 8px;
+            padding: 20px;
+            margin-bottom: 15px;
+        }
+        .key-card h4 {
+            color: #e74c3c;
+            margin-bottom: 10px;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+        .key-card .chain-badge {
+            background: #3498db;
+            padding: 2px 8px;
+            border-radius: 4px;
+            font-size: 0.8em;
+        }
+        .key-field {
+            margin: 10px 0;
+        }
+        .key-field label {
+            color: #888;
+            font-size: 0.85em;
+            display: block;
+            margin-bottom: 4px;
+        }
+        .key-field .value {
+            font-family: monospace;
+            background: rgba(0,0,0,0.3);
+            padding: 8px 12px;
+            border-radius: 4px;
+            word-break: break-all;
+            font-size: 0.9em;
+        }
+        .key-field .private-key {
+            color: #e74c3c;
+            cursor: pointer;
+        }
+        .key-field .private-key:hover {
+            background: rgba(231, 76, 60, 0.2);
+        }
+        .key-transactions {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 10px;
+            margin-top: 10px;
+        }
+        .key-transactions a {
+            color: #f0b90b;
+            text-decoration: none;
+        }
+        .key-transactions a:hover {
+            text-decoration: underline;
+        }
+        .recovery-status {
+            padding: 15px;
+            border-radius: 8px;
+            margin-bottom: 15px;
+        }
+        .recovery-status.success {
+            background: rgba(46, 204, 113, 0.15);
+            border: 1px solid rgba(46, 204, 113, 0.3);
+            color: #2ecc71;
+        }
+        .recovery-status.error {
+            background: rgba(231, 76, 60, 0.15);
+            border: 1px solid rgba(231, 76, 60, 0.3);
+            color: #e74c3c;
+        }
     </style>
 </head>
 <body>
@@ -462,10 +534,15 @@
                 <div class="summary-value" id="crossChainDups">-</div>
                 <div class="summary-label">Cross-Chain Duplicates</div>
             </div>
+            <div class="summary-card">
+                <div class="summary-value critical" id="recoveredKeys">-</div>
+                <div class="summary-label">Recovered Keys</div>
+            </div>
         </div>
 
         <div class="main-tabs">
             <button class="main-tab active" onclick="showMainTab('scanner')">Scanner</button>
+            <button class="main-tab" onclick="showMainTab('keys')">Recovered Keys</button>
             <button class="main-tab" onclick="showMainTab('logs')">Logs</button>
         </div>
 
@@ -490,6 +567,25 @@
                 </div>
                 <div class="duplicate-list" id="duplicateList">
                     <p style="color: #888; text-align: center;">Scanning for duplicates...</p>
+                </div>
+            </div>
+        </div>
+
+        <div id="keysTab" class="tab-content">
+            <div class="section">
+                <h2>
+                    Recovered Private Keys
+                    <div style="float: right;">
+                        <button id="autoRecoveryBtn" onclick="toggleAutoRecovery()" style="margin-right: 10px;">Auto-Recovery: ON</button>
+                        <button onclick="triggerRecovery()">Manual Recovery</button>
+                    </div>
+                </h2>
+                <p style="color: #888; margin-bottom: 15px;">
+                    Private keys recovered from same-key R-value collisions (nonce reuse).
+                    These addresses have compromised private keys.
+                </p>
+                <div id="recoveredKeysList">
+                    <p style="color: #888; text-align: center;">Loading recovered keys...</p>
                 </div>
             </div>
         </div>
@@ -603,6 +699,7 @@
                 document.getElementById('sameKeyDups').textContent = formatNumber(stats.duplicate_same_key);
                 document.getElementById('crossKeyDups').textContent = formatNumber(stats.duplicate_cross_key);
                 document.getElementById('crossChainDups').textContent = formatNumber(stats.duplicate_cross_chain);
+                document.getElementById('recoveredKeys').textContent = formatNumber(stats.recovered_keys);
 
                 // Update chain cards
                 const grid = document.getElementById('chainGrid');
@@ -729,6 +826,8 @@
             if (tab === 'logs') {
                 fetchHealth();
                 fetchLogs();
+            } else if (tab === 'keys') {
+                fetchRecoveredKeys();
             }
         }
 
@@ -918,6 +1017,137 @@
             }
         }
 
+        async function updateAutoRecoveryStatus() {
+            try {
+                const resp = await fetch('/api/stats');
+                const stats = await resp.json();
+                const btn = document.getElementById('autoRecoveryBtn');
+                if (stats.auto_recovery) {
+                    btn.textContent = 'Auto-Recovery: ON';
+                    btn.className = '';
+                } else {
+                    btn.textContent = 'Auto-Recovery: OFF';
+                    btn.className = 'danger';
+                }
+            } catch (e) {
+                console.error('Failed to get auto-recovery status:', e);
+            }
+        }
+
+        async function toggleAutoRecovery() {
+            try {
+                await fetch('/api/recovery/toggle', { method: 'POST' });
+                await updateAutoRecoveryStatus();
+            } catch (e) {
+                console.error('Failed to toggle auto-recovery:', e);
+            }
+        }
+
+        async function fetchRecoveredKeys() {
+            try {
+                await updateAutoRecoveryStatus();
+                const resp = await fetch('/api/recovered-keys');
+                const keys = await resp.json();
+                
+                const container = document.getElementById('recoveredKeysList');
+                if (!keys || keys.length === 0) {
+                    container.innerHTML = '<p style="color: #888; text-align: center;">No recovered keys yet. Same-key R-value collisions will appear here when found and recovered.</p>';
+                    return;
+                }
+
+                container.innerHTML = keys.map(key => {
+                    const explorer = chainExplorers[key.chain] || '';
+                    return `
+                    <div class="key-card">
+                        <h4>
+                            <span>Compromised Address</span>
+                            <span class="chain-badge">${key.chain}</span>
+                        </h4>
+                        <div class="key-field">
+                            <label>Address</label>
+                            <div class="value">
+                                <a href="${explorer}/address/${key.address}" target="_blank">${key.address}</a>
+                            </div>
+                        </div>
+                        <div class="key-field">
+                            <label>Private Key (click to copy)</label>
+                            <div class="value private-key" onclick="copyToClipboard('${key.private_key}')">
+                                ${key.private_key}
+                            </div>
+                        </div>
+                        <div class="key-field">
+                            <label>R Value (reused nonce)</label>
+                            <div class="value" style="font-size: 0.8em;">${key.r_value}</div>
+                        </div>
+                        <div class="key-transactions">
+                            <div>
+                                <label>Transaction 1</label>
+                                <a href="${explorer}/tx/${key.tx_hash_1}" target="_blank">
+                                    ${key.tx_hash_1.substring(0, 16)}...${key.tx_hash_1.substring(58)}
+                                </a>
+                            </div>
+                            <div>
+                                <label>Transaction 2</label>
+                                <a href="${explorer}/tx/${key.tx_hash_2}" target="_blank">
+                                    ${key.tx_hash_2.substring(0, 16)}...${key.tx_hash_2.substring(58)}
+                                </a>
+                            </div>
+                        </div>
+                        <div style="margin-top: 10px; color: #888; font-size: 0.8em;">
+                            Recovered: ${key.created_at}
+                        </div>
+                    </div>
+                `}).join('');
+            } catch (e) {
+                console.error('Failed to fetch recovered keys:', e);
+            }
+        }
+
+        async function triggerRecovery() {
+            const container = document.getElementById('recoveredKeysList');
+            container.innerHTML = '<p style="color: #888; text-align: center;">Attempting key recovery... This may take a moment.</p>';
+
+            try {
+                const resp = await fetch('/api/recover', { method: 'POST' });
+                const result = await resp.json();
+
+                let statusHtml = '';
+                if (result.recovered > 0) {
+                    statusHtml = `<div class="recovery-status success">
+                        Successfully recovered ${result.recovered} private key(s) from ${result.attempted} attempt(s).
+                    </div>`;
+                } else if (result.status === 'no_duplicates') {
+                    statusHtml = `<div class="recovery-status" style="background: rgba(255,255,255,0.05); border: 1px solid rgba(255,255,255,0.1); color: #888;">
+                        ${result.message}
+                    </div>`;
+                } else {
+                    statusHtml = `<div class="recovery-status error">
+                        Recovery completed with ${result.errors?.length || 0} error(s). Recovered: ${result.recovered}/${result.attempted}
+                    </div>`;
+                }
+
+                // Refresh the keys list
+                await fetchRecoveredKeys();
+
+                // Prepend status
+                container.innerHTML = statusHtml + container.innerHTML;
+                
+                // Refresh stats
+                fetchStats();
+            } catch (e) {
+                console.error('Failed to trigger recovery:', e);
+                container.innerHTML = '<div class="recovery-status error">Recovery failed: ' + e.message + '</div>';
+            }
+        }
+
+        function copyToClipboard(text) {
+            navigator.clipboard.writeText(text).then(() => {
+                alert('Private key copied to clipboard!');
+            }).catch(err => {
+                console.error('Failed to copy:', err);
+            });
+        }
+
         // Initial load and intervals
         fetchStats();
         fetchDuplicates();
@@ -927,8 +1157,10 @@
             if (currentMainTab === 'logs') {
                 fetchHealth();
                 fetchLogs();
+            } else if (currentMainTab === 'keys') {
+                fetchRecoveredKeys();
             }
-        }, 2000);
+        }, 5000);
     </script>
 </body>
 </html>
