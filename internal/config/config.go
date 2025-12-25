@@ -15,10 +15,30 @@ type Config struct {
 // ChainConfig defines a blockchain to scan
 type ChainConfig struct {
 	Name        string
-	ChainID     int64
+	ChainID     int
 	RPCURL      string
 	ExplorerURL string
 	Enabled     bool
+}
+
+// ChainByID returns chain config by ID
+func ChainByID(id int) *ChainConfig {
+	for _, c := range DefaultChains() {
+		if c.ChainID == id {
+			return &c
+		}
+	}
+	return nil
+}
+
+// ChainByName returns chain config by name
+func ChainByName(name string) *ChainConfig {
+	for _, c := range DefaultChains() {
+		if c.Name == name {
+			return &c
+		}
+	}
+	return nil
 }
 
 // Load reads configuration from environment variables

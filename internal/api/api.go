@@ -4,60 +4,54 @@ import (
 	"context"
 	"encoding/json"
 	"net/http"
-	"strings"
 	"time"
 
 	"ecdsa-scanner/internal/config"
 	"ecdsa-scanner/internal/db"
 	"ecdsa-scanner/internal/logger"
-	"ecdsa-scanner/internal/recovery"
 	"ecdsa-scanner/internal/scanner"
 )
 
-// GlobalStats represents the overall statistics
+// GlobalStats represents overall statistics
 type GlobalStats struct {
-	Chains              []scanner.ChainStats `json:"chains"`
-	TotalTxScanned      uint64               `json:"total_tx_scanned"`
-	TotalSignatures     int                  `json:"total_signatures"`
-	DuplicateSameKey    int                  `json:"duplicate_same_key"`
-	DuplicateCrossKey   int                  `json:"duplicate_cross_key"`
-	DuplicateCrossChain int                  `json:"duplicate_cross_chain"`
-	RecoveredKeys       int                  `json:"recovered_keys"`
-	DatabaseHealthy     bool                 `json:"database_healthy"`
-	WriteErrors         int                  `json:"write_errors"`
-	AutoRecovery        bool                 `json:"auto_recovery"`
+	Chains            []scanner.ChainStats `json:"chains"`
+	TotalRValues      int                  `json:"total_r_values"`
+	TotalCollisions   int                  `json:"total_collisions"`
+	RecoveredKeys     int                  `json:"recovered_keys"`
+	RecoveredNonces   int                  `json:"recovered_nonces"`
+	PendingComponents int                  `json:"pending_components"`
+	AutoRecovery      bool                 `json:"auto_recovery"`
+	DatabaseHealthy   bool                 `json:"database_healthy"`
 }
 
-// HealthResponse represents the health check response
+// HealthResponse represents health check response
 type HealthResponse struct {
-	Status   string         `json:"status"`
+	Status   string          `json:"status"`
 	Database db.HealthStatus `json:"database"`
-	Chains   []ChainHealth  `json:"chains"`
+	Chains   []ChainHealth   `json:"chains"`
 }
 
-// ChainHealth represents health status for a chain
+// ChainHealth represents health for a chain
 type ChainHealth struct {
-	Name        string `json:"name"`
-	Running     bool   `json:"running"`
-	CircuitOpen bool   `json:"circuit_open"`
-	ErrorCount  int    `json:"error_count"`
+	Name       string `json:"name"`
+	ChainID    int    `json:"chain_id"`
+	Running    bool   `json:"running"`
+	ErrorCount int    `json:"error_count"`
 }
 
-// Handler holds dependencies for HTTP handlers
+// Handler holds HTTP handler dependencies
 type Handler struct {
-	scanner    *scanner.Scanner
-	db         db.Database
-	logger     *logger.Logger
-	ankrAPIKey string
+	scanner *scanner.Scanner
+	db      db.Database
+	logger  *logger.Logger
 }
 
 // NewHandler creates a new API handler
-func NewHandler(s *scanner.Scanner, database db.Database, log *logger.Logger, ankrAPIKey string) *Handler {
+func NewHandler(s *scanner.Scanner, database db.Database, log *logger.Logger) *Handler {
 	return &Handler{
-		scanner:    s,
-		db:         database,
-		logger:     log,
-		ankrAPIKey: ankrAPIKey,
+		scanner: s,
+		db:      database,
+		logger:  log,
 	}
 }
 
@@ -66,11 +60,10 @@ func (h *Handler) RegisterRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/", h.serveIndex)
 	mux.HandleFunc("/api/stats", h.handleStats)
 	mux.HandleFunc("/api/health", h.handleHealth)
-	mux.HandleFunc("/api/duplicates", h.handleDuplicates)
-	mux.HandleFunc("/api/duplicates/same-key", h.handleDuplicatesSameKey)
-	mux.HandleFunc("/api/duplicates/cross-key", h.handleDuplicatesCrossKey)
+	mux.HandleFunc("/api/collisions", h.handleCollisions)
 	mux.HandleFunc("/api/recovered-keys", h.handleRecoveredKeys)
-	mux.HandleFunc("/api/recover", h.handleRecover)
+	mux.HandleFunc("/api/recovered-nonces", h.handleRecoveredNonces)
+	mux.HandleFunc("/api/pending-components", h.handlePendingComponents)
 	mux.HandleFunc("/api/recovery/toggle", h.handleRecoveryToggle)
 	mux.HandleFunc("/api/start", h.handleStart)
 	mux.HandleFunc("/api/stop", h.handleStop)
@@ -81,20 +74,48 @@ func (h *Handler) serveIndex(w http.ResponseWriter, r *http.Request) {
 	http.ServeFile(w, r, "static/index.html")
 }
 
+func (h *Handler) handleStats(w http.ResponseWriter, r *http.Request) {
+	ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
+	defer cancel()
+
+	dbStats, err := h.db.GetStats(ctx)
+
+	stats := GlobalStats{
+		Chains:          h.scanner.GetChainStats(),
+		AutoRecovery:    h.scanner.IsRecoveryEnabled(),
+		DatabaseHealthy: true,
+	}
+
+	if err != nil {
+		h.logger.Warn("Failed to get stats: %v", err)
+		stats.DatabaseHealthy = false
+	} else if dbStats != nil {
+		stats.TotalRValues = dbStats.TotalRValues
+		stats.TotalCollisions = dbStats.TotalCollisions
+		stats.RecoveredKeys = dbStats.RecoveredKeys
+		stats.RecoveredNonces = dbStats.RecoveredNonces
+		stats.PendingComponents = dbStats.PendingComponents
+		stats.DatabaseHealthy = dbStats.Healthy
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(stats)
+}
+
 func (h *Handler) handleHealth(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
 	defer cancel()
 
 	dbHealth := h.db.Health(ctx)
-
 	chainStats := h.scanner.GetChainStats()
-	chainHealths := make([]ChainHealth, 0, len(chainStats))
+
+	var chainHealths []ChainHealth
 	for _, cs := range chainStats {
 		chainHealths = append(chainHealths, ChainHealth{
-			Name:        cs.Chain,
-			Running:     cs.Running,
-			CircuitOpen: cs.CircuitOpen,
-			ErrorCount:  cs.ErrorCount,
+			Name:       cs.Chain,
+			ChainID:    cs.ChainID,
+			Running:    cs.Running,
+			ErrorCount: cs.ErrorCount,
 		})
 	}
 
@@ -104,105 +125,132 @@ func (h *Handler) handleHealth(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusServiceUnavailable)
 	}
 
-	resp := HealthResponse{
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(HealthResponse{
 		Status:   status,
 		Database: dbHealth,
 		Chains:   chainHealths,
+	})
+}
+
+func (h *Handler) handleCollisions(w http.ResponseWriter, r *http.Request) {
+	ctx, cancel := context.WithTimeout(r.Context(), 30*time.Second)
+	defer cancel()
+
+	collisions, err := h.db.GetAllCollisions(ctx)
+	if err != nil {
+		h.logger.Error("Failed to get collisions: %v", err)
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	// Enrich with chain names
+	type EnrichedCollision struct {
+		RValue  string `json:"r_value"`
+		TxRefs  []struct {
+			TxHash    string `json:"tx_hash"`
+			ChainID   int    `json:"chain_id"`
+			ChainName string `json:"chain_name"`
+		} `json:"tx_refs"`
+	}
+
+	var enriched []EnrichedCollision
+	for _, c := range collisions {
+		ec := EnrichedCollision{RValue: c.RValue}
+		for _, ref := range c.TxRefs {
+			chainName := ""
+			if cfg := config.ChainByID(ref.ChainID); cfg != nil {
+				chainName = cfg.Name
+			}
+			ec.TxRefs = append(ec.TxRefs, struct {
+				TxHash    string `json:"tx_hash"`
+				ChainID   int    `json:"chain_id"`
+				ChainName string `json:"chain_name"`
+			}{
+				TxHash:    ref.TxHash,
+				ChainID:   ref.ChainID,
+				ChainName: chainName,
+			})
+		}
+		enriched = append(enriched, ec)
 	}
 
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(resp)
+	json.NewEncoder(w).Encode(enriched)
 }
 
-func (h *Handler) handleStats(w http.ResponseWriter, r *http.Request) {
+func (h *Handler) handleRecoveredKeys(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
 	defer cancel()
 
-	dbStats, err := h.db.GetStats(ctx)
-
-	stats := GlobalStats{
-		Chains:          h.scanner.GetChainStats(),
-		TotalTxScanned:  h.scanner.GetTotalTxScanned(),
-		WriteErrors:     h.scanner.GetWriteErrors(),
-		DatabaseHealthy: true,
-		AutoRecovery:    h.scanner.IsRecoveryEnabled(),
-	}
-
+	keys, err := h.db.GetRecoveredKeys(ctx)
 	if err != nil {
-		h.logger.Warn("Failed to get database stats: %v", err)
-		stats.DatabaseHealthy = false
-	}
-
-	if dbStats != nil {
-		stats.TotalSignatures = dbStats.TotalSignatures
-		stats.DuplicateSameKey = dbStats.DuplicateSameKey
-		stats.DuplicateCrossKey = dbStats.DuplicateCrossKey
-		stats.DuplicateCrossChain = dbStats.DuplicateCrossChain
-		stats.RecoveredKeys = dbStats.RecoveredKeys
-		stats.DatabaseHealthy = dbStats.Healthy
-	}
-
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(stats)
-}
-
-func (h *Handler) handleDuplicates(w http.ResponseWriter, r *http.Request) {
-	ctx, cancel := context.WithTimeout(r.Context(), 30*time.Second)
-	defer cancel()
-
-	duplicates, err := h.db.FindDuplicates(ctx)
-	if err != nil {
-		h.logger.Error("Failed to find duplicates: %v", err)
-		http.Error(w, "Database error: "+err.Error(), http.StatusInternalServerError)
+		h.logger.Error("Failed to get keys: %v", err)
+		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
 
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(duplicates)
-}
-
-func (h *Handler) handleDuplicatesSameKey(w http.ResponseWriter, r *http.Request) {
-	ctx, cancel := context.WithTimeout(r.Context(), 30*time.Second)
-	defer cancel()
-
-	duplicates, err := h.db.FindDuplicates(ctx)
-	if err != nil {
-		h.logger.Error("Failed to find duplicates: %v", err)
-		http.Error(w, "Database error: "+err.Error(), http.StatusInternalServerError)
-		return
-	}
-
-	var sameKey []db.DuplicateR
-	for _, d := range duplicates {
-		if d.SameKey {
-			sameKey = append(sameKey, d)
+	// Add chain names
+	for i := range keys {
+		if cfg := config.ChainByID(keys[i].ChainID); cfg != nil {
+			keys[i].ChainName = cfg.Name
 		}
 	}
 
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(sameKey)
+	json.NewEncoder(w).Encode(keys)
 }
 
-func (h *Handler) handleDuplicatesCrossKey(w http.ResponseWriter, r *http.Request) {
-	ctx, cancel := context.WithTimeout(r.Context(), 30*time.Second)
+func (h *Handler) handleRecoveredNonces(w http.ResponseWriter, r *http.Request) {
+	ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
 	defer cancel()
 
-	duplicates, err := h.db.FindDuplicates(ctx)
+	nonces, err := h.db.GetRecoveredNonces(ctx)
 	if err != nil {
-		h.logger.Error("Failed to find duplicates: %v", err)
-		http.Error(w, "Database error: "+err.Error(), http.StatusInternalServerError)
+		h.logger.Error("Failed to get nonces: %v", err)
+		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
 
-	var crossKey []db.DuplicateR
-	for _, d := range duplicates {
-		if !d.SameKey {
-			crossKey = append(crossKey, d)
-		}
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(nonces)
+}
+
+func (h *Handler) handlePendingComponents(w http.ResponseWriter, r *http.Request) {
+	ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
+	defer cancel()
+
+	comps, err := h.db.GetPendingComponents(ctx)
+	if err != nil {
+		h.logger.Error("Failed to get components: %v", err)
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
 	}
 
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(crossKey)
+	json.NewEncoder(w).Encode(comps)
+}
+
+func (h *Handler) handleRecoveryToggle(w http.ResponseWriter, r *http.Request) {
+	if r.Method != "POST" {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	enabled := r.URL.Query().Get("enabled")
+	if enabled == "" {
+		current := h.scanner.IsRecoveryEnabled()
+		h.scanner.SetRecoveryEnabled(!current)
+	} else if enabled == "true" || enabled == "1" {
+		h.scanner.SetRecoveryEnabled(true)
+	} else {
+		h.scanner.SetRecoveryEnabled(false)
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"auto_recovery": h.scanner.IsRecoveryEnabled(),
+	})
 }
 
 func (h *Handler) handleStart(w http.ResponseWriter, r *http.Request) {
@@ -214,10 +262,10 @@ func (h *Handler) handleStart(w http.ResponseWriter, r *http.Request) {
 	chain := r.URL.Query().Get("chain")
 	if chain == "" {
 		h.scanner.StartAll()
-		h.logger.Info("Started all chain scanners")
+		h.logger.Info("Started all scanners")
 	} else {
-		h.scanner.StartChain(chain)
-		h.logger.Info("Started chain scanner: %s", chain)
+		h.scanner.StartChainByName(chain)
+		h.logger.Info("Started scanner: %s", chain)
 	}
 
 	w.Header().Set("Content-Type", "application/json")
@@ -233,10 +281,10 @@ func (h *Handler) handleStop(w http.ResponseWriter, r *http.Request) {
 	chain := r.URL.Query().Get("chain")
 	if chain == "" {
 		h.scanner.StopAll()
-		h.logger.Info("Stopped all chain scanners")
+		h.logger.Info("Stopped all scanners")
 	} else {
-		h.scanner.StopChain(chain)
-		h.logger.Info("Stopped chain scanner: %s", chain)
+		h.scanner.StopChainByName(chain)
+		h.logger.Info("Stopped scanner: %s", chain)
 	}
 
 	w.Header().Set("Content-Type", "application/json")
@@ -246,144 +294,4 @@ func (h *Handler) handleStop(w http.ResponseWriter, r *http.Request) {
 func (h *Handler) handleLogs(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(h.logger.GetEntries())
-}
-
-func (h *Handler) handleRecoveredKeys(w http.ResponseWriter, r *http.Request) {
-	ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
-	defer cancel()
-
-	keys, err := h.db.GetRecoveredKeys(ctx)
-	if err != nil {
-		h.logger.Error("Failed to get recovered keys: %v", err)
-		http.Error(w, "Database error: "+err.Error(), http.StatusInternalServerError)
-		return
-	}
-
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(keys)
-}
-
-func (h *Handler) handleRecover(w http.ResponseWriter, r *http.Request) {
-	if r.Method != "POST" {
-		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
-		return
-	}
-
-	ctx, cancel := context.WithTimeout(r.Context(), 60*time.Second)
-	defer cancel()
-
-	// Get same-key duplicates that haven't been recovered yet
-	duplicates, err := h.db.GetSameKeyDuplicatesForRecovery(ctx)
-	if err != nil {
-		h.logger.Error("Failed to get duplicates for recovery: %v", err)
-		http.Error(w, "Database error: "+err.Error(), http.StatusInternalServerError)
-		return
-	}
-
-	if len(duplicates) == 0 {
-		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(map[string]interface{}{
-			"status":    "no_duplicates",
-			"message":   "No same-key duplicates found for recovery",
-			"recovered": 0,
-		})
-		return
-	}
-
-	// Try to recover keys
-	var recovered int
-	var errors []string
-
-	for _, dup := range duplicates {
-		if len(dup.Entries) < 2 {
-			continue
-		}
-
-		chain := dup.Entries[0].Chain
-		rpcURL := h.getRPCURL(chain)
-		if rpcURL == "" {
-			errors = append(errors, "No RPC URL for chain: "+chain)
-			continue
-		}
-
-		h.logger.Info("Attempting key recovery for address %s on %s", dup.Entries[0].Address, chain)
-
-		recoveredKey, err := recovery.RecoverPrivateKey(ctx, rpcURL, dup.Entries[0].TxHash, dup.Entries[1].TxHash)
-		if err != nil {
-			errMsg := "Recovery failed for " + dup.Entries[0].Address + ": " + err.Error()
-			h.logger.Warn("%s", errMsg)
-			errors = append(errors, errMsg)
-			continue
-		}
-
-		recoveredKey.Chain = chain
-
-		// Save to database
-		dbKey := &db.RecoveredKey{
-			Address:    recoveredKey.Address,
-			PrivateKey: recoveredKey.PrivateKey,
-			Chain:      recoveredKey.Chain,
-			RValue:     recoveredKey.RValue,
-			TxHash1:    recoveredKey.TxHash1,
-			TxHash2:    recoveredKey.TxHash2,
-		}
-
-		if err := h.db.SaveRecoveredKey(ctx, dbKey); err != nil {
-			h.logger.Error("Failed to save recovered key: %v", err)
-			errors = append(errors, "Failed to save key for "+recoveredKey.Address)
-			continue
-		}
-
-		h.logger.Info("Successfully recovered private key for %s on %s", recoveredKey.Address, chain)
-		recovered++
-	}
-
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(map[string]interface{}{
-		"status":    "completed",
-		"recovered": recovered,
-		"attempted": len(duplicates),
-		"errors":    errors,
-	})
-}
-
-func (h *Handler) handleRecoveryToggle(w http.ResponseWriter, r *http.Request) {
-	if r.Method != "POST" {
-		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
-		return
-	}
-
-	enabled := r.URL.Query().Get("enabled")
-	if enabled == "" {
-		// Toggle current state
-		current := h.scanner.IsRecoveryEnabled()
-		h.scanner.SetRecoveryEnabled(!current)
-		h.logger.Info("Auto-recovery toggled to %v", !current)
-	} else if enabled == "true" || enabled == "1" {
-		h.scanner.SetRecoveryEnabled(true)
-		h.logger.Info("Auto-recovery enabled")
-	} else {
-		h.scanner.SetRecoveryEnabled(false)
-		h.logger.Info("Auto-recovery disabled")
-	}
-
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(map[string]interface{}{
-		"status":        "ok",
-		"auto_recovery": h.scanner.IsRecoveryEnabled(),
-	})
-}
-
-func (h *Handler) getRPCURL(chainName string) string {
-	// Get RPC URL from config
-	for _, chain := range config.DefaultChains() {
-		if chain.Name == chainName {
-			rpcURL := chain.RPCURL
-			if h.ankrAPIKey != "" && strings.Contains(rpcURL, "ankr.com") {
-				rpcURL = rpcURL + "/" + h.ankrAPIKey
-			}
-			return rpcURL
-		}
-	}
-	return ""
 }

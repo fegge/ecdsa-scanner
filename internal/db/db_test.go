@@ -3,14 +3,11 @@ package db
 import (
 	"context"
 	"errors"
-	"strings"
 	"testing"
-
-	"ecdsa-scanner/internal/retry"
 )
 
 func TestWrapError(t *testing.T) {
-	db := &DB{retryConfig: retry.DefaultConfig()}
+	db := &DB{}
 
 	tests := []struct {
 		name        string
@@ -20,6 +17,7 @@ func TestWrapError(t *testing.T) {
 		{"nil error", nil, true},
 		{"generic error", errors.New("some error"), false},
 		{"context deadline", context.DeadlineExceeded, false},
+		{"sql no rows", ErrNotFound, false},
 	}
 
 	for _, tt := range tests {
@@ -35,77 +33,82 @@ func TestWrapError(t *testing.T) {
 	}
 }
 
-func TestBuildAddressExclusion(t *testing.T) {
+func TestHexConversion(t *testing.T) {
 	tests := []struct {
-		name      string
-		addresses map[string]bool
-		expected  string
+		input    string
+		expected string
 	}{
-		{
-			name:      "empty",
-			addresses: map[string]bool{},
-			expected:  "",
-		},
-		{
-			name:      "single address",
-			addresses: map[string]bool{"0xdead": true},
-			expected:  " AND from_address NOT IN ('0xdead')",
-		},
-		{
-			name:      "multiple addresses",
-			addresses: map[string]bool{"0xdead": true, "0xbeef": true},
-			expected:  " AND from_address NOT IN (",
-		},
+		{"0xabcd", "0xabcd"},
+		{"abcd", "0xabcd"},
+		{"0x", "0x"},
 	}
 
 	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			db := &DB{systemAddresses: tt.addresses}
-			result := db.buildAddressExclusion()
-
-			if tt.name == "multiple addresses" {
-				if !strings.HasPrefix(result, tt.expected) {
-					t.Errorf("expected prefix %q, got %q", tt.expected, result)
-				}
-				if !strings.Contains(result, "'0xdead'") || !strings.Contains(result, "'0xbeef'") {
-					t.Errorf("expected both addresses in result, got %q", result)
-				}
-			} else if result != tt.expected {
-				t.Errorf("expected %q, got %q", tt.expected, result)
-			}
-		})
+		b := hexToBytes(tt.input)
+		result := bytesToHex(b)
+		if result != tt.expected {
+			t.Errorf("hexToBytes/bytesToHex(%q) = %q, want %q", tt.input, result, tt.expected)
+		}
 	}
 }
 
-func TestSignatureFiltering(t *testing.T) {
-	db := &DB{
-		systemAddresses: map[string]bool{
-			"0xdeaddeaddeaddeaddeaddeaddeaddeaddead0001": true,
-		},
-		retryConfig: retry.DefaultConfig(),
+func TestMockDB(t *testing.T) {
+	ctx := context.Background()
+	db := NewMock()
+
+	// Test R-value collision detection
+	_, isCollision, err := db.CheckAndInsertRValue(ctx, "0xabc123", "0xtx1", 1)
+	if err != nil {
+		t.Fatalf("CheckAndInsertRValue failed: %v", err)
+	}
+	if isCollision {
+		t.Error("Expected no collision on first insert")
 	}
 
-	sigs := []Signature{
-		{Chain: "eth", TxHash: "0x1", FromAddress: "0xuser", R: "0xabc", S: "0xdef", V: "0x1b"},
-		{Chain: "eth", TxHash: "0x2", FromAddress: "0xuser", R: "0x0", S: "0xdef", V: "0x1b"},                                      // Should be filtered (R=0)
-		{Chain: "eth", TxHash: "0x3", FromAddress: "0xdeaddeaddeaddeaddeaddeaddeaddeaddead0001", R: "0xabc", S: "0xdef", V: "0x1b"}, // Should be filtered (system)
-		{Chain: "eth", TxHash: "0x4", FromAddress: "0xuser2", R: "", S: "0xdef", V: "0x1b"},                                       // Should be filtered (empty R)
+	// Second insert with same R should be a collision
+	existing, isCollision, err := db.CheckAndInsertRValue(ctx, "0xabc123", "0xtx2", 1)
+	if err != nil {
+		t.Fatalf("CheckAndInsertRValue failed: %v", err)
+	}
+	if !isCollision {
+		t.Error("Expected collision on second insert")
+	}
+	if existing == nil || existing.TxHash != "0xtx1" {
+		t.Error("Expected to get first tx reference")
 	}
 
-	// Test that filtering logic works by checking the batch building
-	// (We can't test actual insertion without a real DB)
-	validCount := 0
-	for _, sig := range sigs {
-		if sig.R == "0x0" || sig.R == "0x00" || sig.R == "" {
-			continue
-		}
-		if db.systemAddresses[strings.ToLower(sig.FromAddress)] {
-			continue
-		}
-		validCount++
+	// Test recovered key
+	keyID, err := db.SaveRecoveredKey(ctx, &RecoveredKey{
+		Address:    "0xaddr",
+		PrivateKey: "0xprivkey",
+		ChainID:    1,
+		RValues:    []string{"0xr1"},
+		TxHashes:   []string{"0xtx1", "0xtx2"},
+	})
+	if err != nil {
+		t.Fatalf("SaveRecoveredKey failed: %v", err)
+	}
+	if keyID == 0 {
+		t.Error("Expected non-zero key ID")
 	}
 
-	if validCount != 1 {
-		t.Errorf("expected 1 valid signature after filtering, got %d", validCount)
+	recovered, err := db.IsKeyRecovered(ctx, "0xaddr", 1)
+	if err != nil {
+		t.Fatalf("IsKeyRecovered failed: %v", err)
+	}
+	if !recovered {
+		t.Error("Expected key to be recovered")
+	}
+
+	// Test stats
+	stats, err := db.GetStats(ctx)
+	if err != nil {
+		t.Fatalf("GetStats failed: %v", err)
+	}
+	if stats.TotalRValues != 1 {
+		t.Errorf("Expected 1 R value, got %d", stats.TotalRValues)
+	}
+	if stats.RecoveredKeys != 1 {
+		t.Errorf("Expected 1 recovered key, got %d", stats.RecoveredKeys)
 	}
 }

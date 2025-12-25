@@ -20,23 +20,20 @@ import (
 func main() {
 	log.SetFlags(log.LstdFlags | log.Lmicroseconds)
 
-	// Load configuration
 	cfg := config.Load()
-
-	// Initialize logger
 	appLogger := logger.New(500)
 
-	// Initialize database (or mock for demo mode)
+	// Initialize database
 	var database db.Database
 	var err error
 
 	if cfg.DatabaseURL == "" {
 		appLogger.Warn("DATABASE_URL not set - running in demo mode")
-		database = db.NewMock(config.SystemAddresses())
+		database = db.NewMock()
 	} else {
-		database, err = db.New(cfg.DatabaseURL, config.SystemAddresses())
+		database, err = db.New(cfg.DatabaseURL)
 		if err != nil {
-			log.Fatalf("Failed to initialize database: %v", err)
+			log.Fatalf("Database error: %v", err)
 		}
 		appLogger.Info("Connected to database")
 	}
@@ -45,20 +42,18 @@ func main() {
 	// Initialize scanner
 	sc, err := scanner.New(database, appLogger, cfg.AnkrAPIKey)
 	if err != nil {
-		log.Fatalf("Failed to create scanner: %v", err)
+		log.Fatalf("Scanner error: %v", err)
 	}
 
-	// Initialize API handler
+	// Initialize API
 	handler := api.NewHandler(sc, database, appLogger)
-
-	// Register routes
 	mux := http.NewServeMux()
 	handler.RegisterRoutes(mux)
 
-	// Auto-start all chains
+	// Auto-start scanners
 	go func() {
 		time.Sleep(2 * time.Second)
-		appLogger.Log("Auto-starting all chain scanners...")
+		appLogger.Log("Auto-starting scanners...")
 		sc.StartAll()
 	}()
 
@@ -72,19 +67,18 @@ func main() {
 		os.Exit(0)
 	}()
 
-	// Start HTTP server(s)
+	// Start HTTP server
 	addrs := strings.Split(cfg.BindAddrs, ",")
 	for i, addr := range addrs[:len(addrs)-1] {
 		listenAddr := fmt.Sprintf("%s:%s", strings.TrimSpace(addr), cfg.Port)
 		appLogger.Log("Starting server on %s", listenAddr)
 		go func(la string, idx int) {
 			if err := http.ListenAndServe(la, mux); err != nil {
-				log.Printf("Listener %d (%s) error: %v", idx, la, err)
+				log.Printf("Listener %d error: %v", idx, err)
 			}
 		}(listenAddr, i)
 	}
 
-	// Last address blocks
 	lastAddr := fmt.Sprintf("%s:%s", strings.TrimSpace(addrs[len(addrs)-1]), cfg.Port)
 	appLogger.Log("Starting server on %s", lastAddr)
 	log.Fatal(http.ListenAndServe(lastAddr, mux))
