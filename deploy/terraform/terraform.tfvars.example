@@ -1,0 +1,29 @@
+# DigitalOcean API token
+# Get from: https://cloud.digitalocean.com/account/api/tokens
+do_token = "dop_v1_xxxxx"
+
+# DigitalOcean SSH key IDs
+# List with: doctl compute ssh-key list
+ssh_key_ids = ["12345678"]
+
+# Tailscale auth key (reusable, ephemeral recommended)
+# Get from: https://login.tailscale.com/admin/settings/keys
+tailscale_auth_key = "tskey-auth-xxxxx"
+
+# Your Tailscale tailnet name
+# Find at: https://login.tailscale.com/admin/settings/general
+tailscale_tailnet = "example.ts.net"
+
+# PostgreSQL password for ecdsa_scanner user
+postgres_password = "your-secure-password-here"
+
+# Ankr API key (optional, for higher rate limits)
+# Get from: https://www.ankr.com/rpc/
+ankr_api_key = ""
+
+# Region (optional)
+region = "nyc1"
+
+# Instance sizes (optional)
+scanner_size = "s-1vcpu-1gb"
+db_size      = "s-1vcpu-2gb"

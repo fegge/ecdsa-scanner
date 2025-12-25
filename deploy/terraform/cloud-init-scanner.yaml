@@ -1,0 +1,107 @@
+#cloud-config
+
+package_update: true
+package_upgrade: true
+
+packages:
+  - curl
+  - ufw
+  - git
+
+write_files:
+  - path: /opt/ecdsa-scanner/.env
+    permissions: '0600'
+    content: |
+      DATABASE_URL=postgres://ecdsa_scanner:${postgres_password}@${db_tailscale_name}.${tailscale_tailnet}:5432/ecdsa_scanner
+      ANKR_API_KEY=${ankr_api_key}
+      PORT=8000
+      BIND_ADDRS=0.0.0.0
+
+  - path: /etc/systemd/system/ecdsa-scanner.service
+    content: |
+      [Unit]
+      Description=Multi-Chain ECDSA R-Value Scanner
+      After=network.target tailscaled.service
+      Wants=tailscaled.service
+
+      [Service]
+      Type=simple
+      User=ecdsa
+      Group=ecdsa
+      WorkingDirectory=/opt/ecdsa-scanner
+      ExecStart=/opt/ecdsa-scanner/ecdsa-scanner
+      Restart=always
+      RestartSec=5
+      EnvironmentFile=/opt/ecdsa-scanner/.env
+
+      [Install]
+      WantedBy=multi-user.target
+
+  - path: /opt/setup-scanner.sh
+    permissions: '0755'
+    content: |
+      #!/bin/bash
+      set -e
+      
+      # Create user
+      useradd -r -s /bin/false ecdsa || true
+      
+      # Install Go
+      curl -fsSL https://go.dev/dl/go1.24.4.linux-amd64.tar.gz | tar -C /usr/local -xzf -
+      export PATH=$PATH:/usr/local/go/bin
+      
+      # Clone and build
+      cd /opt
+      git clone https://github.com/fegge/ecdsa-scanner.git ecdsa-scanner-src
+      cd ecdsa-scanner-src
+      go build -o /opt/ecdsa-scanner/ecdsa-scanner ./cmd/scanner/
+      cp -r static /opt/ecdsa-scanner/
+      
+      # Set permissions
+      chown -R ecdsa:ecdsa /opt/ecdsa-scanner
+      
+      # Cleanup
+      rm -rf /opt/ecdsa-scanner-src
+      
+      # Wait for database to be reachable via Tailscale
+      echo "Waiting for database..."
+      for i in {1..30}; do
+        if tailscale ping ${db_tailscale_name} 2>/dev/null; then
+          echo "Database reachable"
+          break
+        fi
+        sleep 5
+      done
+      
+      # Enable and start service
+      systemctl daemon-reload
+      systemctl enable ecdsa-scanner
+      systemctl start ecdsa-scanner
+      
+      echo "ECDSA Scanner installed and started"
+
+runcmd:
+  # Install Tailscale
+  - curl -fsSL https://tailscale.com/install.sh | sh
+  
+  # Start Tailscale and authenticate
+  - tailscale up --authkey=${tailscale_auth_key} --hostname=ecdsa-scanner-app --ssh
+  
+  # Configure firewall - only allow Tailscale
+  - ufw default deny incoming
+  - ufw default allow outgoing
+  - ufw allow in on tailscale0
+  - ufw --force enable
+  
+  # Create app directory
+  - mkdir -p /opt/ecdsa-scanner
+  
+  # Setup scanner
+  - /opt/setup-scanner.sh
+  
+  # Disable SSH on public interface (use Tailscale SSH)
+  - |
+    cat > /etc/ssh/sshd_config.d/tailscale-only.conf <<EOF
+    ListenAddress $(tailscale ip -4)
+    EOF
+  - systemctl restart sshd

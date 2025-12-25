@@ -1,0 +1,83 @@
+#cloud-config
+
+package_update: true
+package_upgrade: true
+
+packages:
+  - postgresql
+  - postgresql-contrib
+  - curl
+  - ufw
+
+write_files:
+  - path: /etc/postgresql/16/main/pg_hba.conf.tailscale
+    content: |
+      # PostgreSQL Client Authentication Configuration File
+      # Only allow connections from Tailscale network (100.x.x.x)
+      
+      # Local connections
+      local   all             postgres                                peer
+      local   all             all                                     peer
+      
+      # Tailscale network connections (100.64.0.0/10)
+      host    all             all             100.64.0.0/10           scram-sha-256
+      
+      # Reject everything else
+      host    all             all             0.0.0.0/0               reject
+      host    all             all             ::/0                    reject
+
+  - path: /opt/setup-db.sh
+    permissions: '0755'
+    content: |
+      #!/bin/bash
+      set -e
+      
+      # Wait for PostgreSQL to be ready
+      until pg_isready; do
+        echo "Waiting for PostgreSQL..."
+        sleep 2
+      done
+      
+      # Create database and user
+      sudo -u postgres psql <<EOF
+      CREATE USER ecdsa_scanner WITH PASSWORD '${postgres_password}';
+      CREATE DATABASE ecdsa_scanner OWNER ecdsa_scanner;
+      GRANT ALL PRIVILEGES ON DATABASE ecdsa_scanner TO ecdsa_scanner;
+      EOF
+      
+      # Configure PostgreSQL to listen on Tailscale interface
+      echo "listen_addresses = 'localhost,$(tailscale ip -4)'" >> /etc/postgresql/16/main/postgresql.conf
+      
+      # Use Tailscale-only pg_hba.conf
+      cp /etc/postgresql/16/main/pg_hba.conf.tailscale /etc/postgresql/16/main/pg_hba.conf
+      
+      # Restart PostgreSQL
+      systemctl restart postgresql
+      
+      echo "PostgreSQL configured for Tailscale-only access"
+
+runcmd:
+  # Install Tailscale
+  - curl -fsSL https://tailscale.com/install.sh | sh
+  
+  # Start Tailscale and authenticate
+  - tailscale up --authkey=${tailscale_auth_key} --hostname=ecdsa-scanner-db --ssh
+  
+  # Configure firewall - only allow Tailscale
+  - ufw default deny incoming
+  - ufw default allow outgoing
+  - ufw allow in on tailscale0
+  - ufw --force enable
+  
+  # Wait for Tailscale to get an IP
+  - sleep 10
+  
+  # Setup database
+  - /opt/setup-db.sh
+  
+  # Disable SSH on public interface (use Tailscale SSH)
+  - |
+    cat > /etc/ssh/sshd_config.d/tailscale-only.conf <<EOF
+    ListenAddress $(tailscale ip -4)
+    EOF
+  - systemctl restart sshd
