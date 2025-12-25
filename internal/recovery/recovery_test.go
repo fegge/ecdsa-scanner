@@ -281,3 +281,124 @@ func TestGetAddressFromPrivateKey(t *testing.T) {
 		t.Errorf("Expected %s, got %s", expectedAddr, addr)
 	}
 }
+
+func TestLinearSystemMultiKeyMultiNonce(t *testing.T) {
+	// Scenario: 3 different keys share 2 nonces due to bad RNG
+	// Key A and Key B both use nonce k1
+	// Key B and Key C both use nonce k2
+	// This creates a chain that lets us recover all 3 keys
+
+	// Generate 3 private keys
+	privKeyA, _ := crypto.GenerateKey()
+	privKeyB, _ := crypto.GenerateKey()
+	privKeyC, _ := crypto.GenerateKey()
+
+	// Generate 2 shared nonces
+	k1, _ := rand.Int(rand.Reader, secp256k1N)
+	k2, _ := rand.Int(rand.Reader, secp256k1N)
+
+	// Create signatures:
+	// Key A signs msg1 and msg2 with k1 (same-key reuse)
+	// Key B signs msg3 with k1 and msg4 with k2 (cross-key bridge)
+	// Key C signs msg5 and msg6 with k2 (same-key reuse)
+
+	msg1 := crypto.Keccak256([]byte("msg1"))
+	msg2 := crypto.Keccak256([]byte("msg2"))
+	msg3 := crypto.Keccak256([]byte("msg3"))
+	msg4 := crypto.Keccak256([]byte("msg4"))
+	msg5 := crypto.Keccak256([]byte("msg5"))
+	msg6 := crypto.Keccak256([]byte("msg6"))
+
+	r1, s1 := signWithNonce(privKeyA, msg1, k1)
+	_, s2 := signWithNonce(privKeyA, msg2, k1) // r2 == r1
+	r3, s3 := signWithNonce(privKeyB, msg3, k1) // r3 == r1
+	r4, s4 := signWithNonce(privKeyB, msg4, k2)
+	_, s5 := signWithNonce(privKeyC, msg5, k2) // r5 == r4
+	_, s6 := signWithNonce(privKeyC, msg6, k2) // r6 == r4
+
+	// Verify nonce reuse creates matching R values
+	if r1.Cmp(r3) != 0 {
+		t.Fatal("k1 should produce same R for different keys")
+	}
+	if r4.Cmp(r4) != 0 {
+		t.Fatal("k2 should produce same R for different keys")
+	}
+
+	// Build linear system
+	// Equation: s*k - r*d = z (mod n)
+	// Rearranged: s*k + (-r)*d = z
+
+	ls := NewLinearSystem(secp256k1N)
+
+	// Variables: k1, k2, dA, dB, dC
+	k1Idx := ls.AddVariable("k1")
+	k2Idx := ls.AddVariable("k2")
+	dAIdx := ls.AddVariable("dA")
+	dBIdx := ls.AddVariable("dB")
+	dCIdx := ls.AddVariable("dC")
+
+	negR1 := new(big.Int).Neg(r1)
+	negR1.Mod(negR1, secp256k1N)
+	negR4 := new(big.Int).Neg(r4)
+	negR4.Mod(negR4, secp256k1N)
+
+	z1 := new(big.Int).SetBytes(msg1)
+	z2 := new(big.Int).SetBytes(msg2)
+	z3 := new(big.Int).SetBytes(msg3)
+	z4 := new(big.Int).SetBytes(msg4)
+	z5 := new(big.Int).SetBytes(msg5)
+	z6 := new(big.Int).SetBytes(msg6)
+
+	// sig1: s1*k1 - r1*dA = z1 → Key A, nonce k1
+	ls.AddEquation(map[int]*big.Int{k1Idx: s1, dAIdx: negR1}, z1)
+	// sig2: s2*k1 - r1*dA = z2 → Key A, nonce k1
+	ls.AddEquation(map[int]*big.Int{k1Idx: s2, dAIdx: negR1}, z2)
+	// sig3: s3*k1 - r1*dB = z3 → Key B, nonce k1
+	ls.AddEquation(map[int]*big.Int{k1Idx: s3, dBIdx: negR1}, z3)
+	// sig4: s4*k2 - r4*dB = z4 → Key B, nonce k2
+	ls.AddEquation(map[int]*big.Int{k2Idx: s4, dBIdx: negR4}, z4)
+	// sig5: s5*k2 - r4*dC = z5 → Key C, nonce k2
+	ls.AddEquation(map[int]*big.Int{k2Idx: s5, dCIdx: negR4}, z5)
+	// sig6: s6*k2 - r4*dC = z6 → Key C, nonce k2
+	ls.AddEquation(map[int]*big.Int{k2Idx: s6, dCIdx: negR4}, z6)
+
+	t.Logf("System: %d equations, %d variables", ls.NumEquations(), ls.NumVariables())
+
+	if !ls.CanSolve() {
+		t.Fatal("System should be solvable")
+	}
+
+	solutions, err := ls.Solve()
+	if err != nil {
+		t.Fatalf("Failed to solve: %v", err)
+	}
+
+	// Verify recovered values match originals
+	if solutions["k1"].Cmp(k1) != 0 {
+		t.Errorf("k1 mismatch")
+	}
+	if solutions["k2"].Cmp(k2) != 0 {
+		t.Errorf("k2 mismatch")
+	}
+	if solutions["dA"].Cmp(privKeyA.D) != 0 {
+		t.Errorf("dA mismatch")
+	}
+	if solutions["dB"].Cmp(privKeyB.D) != 0 {
+		t.Errorf("dB mismatch")
+	}
+	if solutions["dC"].Cmp(privKeyC.D) != 0 {
+		t.Errorf("dC mismatch")
+	}
+
+	// Verify we can derive addresses from recovered keys
+	dABytes := solutions["dA"].FillBytes(make([]byte, 32))
+	recoveredA, _ := crypto.ToECDSA(dABytes)
+	addrA := crypto.PubkeyToAddress(recoveredA.PublicKey).Hex()
+	expectedAddrA := crypto.PubkeyToAddress(privKeyA.PublicKey).Hex()
+
+	if addrA != expectedAddrA {
+		t.Errorf("Recovered address A mismatch: got %s, want %s", addrA, expectedAddrA)
+	}
+
+	t.Logf("Successfully recovered 3 private keys and 2 nonces from 6 signatures!")
+}
