@@ -55,7 +55,7 @@ func (m *MockDB) GetCollisionTxRefs(ctx context.Context, rValue string) ([]TxRef
 }
 
 func (m *MockDB) GetAllCollisions(ctx context.Context) ([]Collision, error) {
-	return nil, nil
+	return []Collision{}, nil
 }
 
 func (m *MockDB) GetLastBlock(ctx context.Context, chainID int) (uint64, error) {
@@ -82,6 +82,9 @@ func (m *MockDB) SaveRecoveredKey(ctx context.Context, key *RecoveredKey) (int64
 func (m *MockDB) GetRecoveredKeys(ctx context.Context) ([]RecoveredKey, error) {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
+	if m.keys == nil {
+		return []RecoveredKey{}, nil
+	}
 	return m.keys, nil
 }
 
@@ -115,7 +118,7 @@ func (m *MockDB) GetRecoveredNonce(ctx context.Context, rValue string) (*Recover
 func (m *MockDB) GetRecoveredNonces(ctx context.Context) ([]RecoveredNonce, error) {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
-	var nonces []RecoveredNonce
+	nonces := []RecoveredNonce{}
 	for _, n := range m.nonces {
 		nonces = append(nonces, n)
 	}
@@ -133,6 +136,9 @@ func (m *MockDB) SavePendingComponent(ctx context.Context, comp *PendingComponen
 func (m *MockDB) GetPendingComponents(ctx context.Context) ([]PendingComponent, error) {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
+	if m.comps == nil {
+		return []PendingComponent{}, nil
+	}
 	return m.comps, nil
 }
 

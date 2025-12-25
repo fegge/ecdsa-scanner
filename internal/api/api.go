@@ -154,7 +154,7 @@ func (h *Handler) handleCollisions(w http.ResponseWriter, r *http.Request) {
 		} `json:"tx_refs"`
 	}
 
-	var enriched []EnrichedCollision
+	enriched := []EnrichedCollision{}
 	for _, c := range collisions {
 		ec := EnrichedCollision{RValue: c.RValue}
 		for _, ref := range c.TxRefs {

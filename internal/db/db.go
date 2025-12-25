@@ -368,7 +368,7 @@ func (db *DB) GetRecoveredKeys(ctx context.Context) ([]RecoveredKey, error) {
 	}
 	defer rows.Close()
 
-	var keys []RecoveredKey
+	keys := []RecoveredKey{}
 	for rows.Next() {
 		var key RecoveredKey
 		var addr, privKey []byte
@@ -439,7 +439,7 @@ func (db *DB) GetRecoveredNonces(ctx context.Context) ([]RecoveredNonce, error) 
 	}
 	defer rows.Close()
 
-	var nonces []RecoveredNonce
+	nonces := []RecoveredNonce{}
 	for rows.Next() {
 		var rValue, kValue []byte
 		var keyID int64
@@ -493,7 +493,7 @@ func (db *DB) GetPendingComponents(ctx context.Context) ([]PendingComponent, err
 	}
 	defer rows.Close()
 
-	var comps []PendingComponent
+	comps := []PendingComponent{}
 	for rows.Next() {
 		var comp PendingComponent
 		var rValues, txHashes, addresses [][]byte
@@ -551,7 +551,7 @@ func (db *DB) GetAllCollisions(ctx context.Context) ([]Collision, error) {
 	}
 	defer rows.Close()
 
-	var collisions []Collision
+	collisions := []Collision{}
 	for rows.Next() {
 		var rValue []byte
 		if err := rows.Scan(&rValue); err != nil {
