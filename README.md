@@ -101,7 +101,65 @@ BIND_ADDRS=127.0.0.1
 
 ## Deployment
 
-### Systemd Service
+### Infrastructure Deployment (Recommended)
+
+The easiest way to deploy is using Terraform to provision infrastructure on DigitalOcean with Tailscale for secure networking.
+
+#### Prerequisites
+
+1. [DigitalOcean account](https://cloud.digitalocean.com/) with API token
+2. [Tailscale account](https://tailscale.com/) with auth key
+3. [Terraform](https://terraform.io/) installed locally
+
+#### Deploy
+
+```bash
+cd deploy/terraform
+
+# Configure
+cp terraform.tfvars.example terraform.tfvars
+# Edit terraform.tfvars with your credentials:
+#   - do_token: DigitalOcean API token
+#   - tailscale_auth_key: From https://login.tailscale.com/admin/settings/keys
+#   - tailscale_tailnet: Your tailnet (e.g., example.ts.net)
+#   - postgres_password: Secure password for database
+#   - ssh_key_ids: Your DigitalOcean SSH key IDs
+
+# Deploy
+terraform init
+terraform apply
+```
+
+This creates:
+- **Scanner node**: Runs ecdsa-scanner service
+- **Database node**: PostgreSQL server
+- Both secured via Tailscale (no public ports exposed)
+
+#### Access
+
+```bash
+# Web UI (via Tailscale)
+open http://ecdsa-scanner-app.<your-tailnet>:8000
+
+# SSH (via Tailscale)
+ssh root@ecdsa-scanner-app
+ssh root@ecdsa-scanner-db
+
+# Or use mosh for better connectivity
+mosh root@ecdsa-scanner-app
+```
+
+#### Estimated Costs
+
+- Scanner node (s-1vcpu-1gb): ~$6/month
+- Database node (s-1vcpu-2gb): ~$12/month
+- **Total**: ~$18/month
+
+See [deploy/README.md](deploy/README.md) for full deployment documentation.
+
+### Manual Deployment
+
+#### Systemd Service
 
 ```bash
 # Copy and configure service file
