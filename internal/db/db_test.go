@@ -196,3 +196,119 @@ func TestMockDBBatchEmpty(t *testing.T) {
 		t.Errorf("Expected 0 collisions for empty input, got %d", len(collisions))
 	}
 }
+
+func TestMockDBBatchSkipsDuplicateTransactions(t *testing.T) {
+	ctx := context.Background()
+	db := NewMock()
+
+	// Insert initial R value with specific tx hash
+	db.CheckAndInsertRValue(ctx, "0xr_value_1", "0xtx_original", 1)
+
+	// Try to insert same R value with SAME tx hash - should NOT be a collision
+	txs := []TxInput{
+		{RValue: "0xr_value_1", TxHash: "0xtx_original", ChainID: 1, Address: "0xaddr1"}, // same tx, not a collision
+	}
+
+	collisions, err := db.BatchCheckAndInsertRValues(ctx, txs)
+	if err != nil {
+		t.Fatalf("BatchCheckAndInsertRValues failed: %v", err)
+	}
+
+	if len(collisions) != 0 {
+		t.Errorf("Expected 0 collisions for duplicate tx, got %d", len(collisions))
+	}
+}
+
+func TestMockDBBatchDetectsRealCollisions(t *testing.T) {
+	ctx := context.Background()
+	db := NewMock()
+
+	// Insert initial R value
+	db.CheckAndInsertRValue(ctx, "0xr_value_1", "0xtx_first", 1)
+
+	// Insert same R value with DIFFERENT tx hash - should be a collision
+	txs := []TxInput{
+		{RValue: "0xr_value_1", TxHash: "0xtx_second", ChainID: 1, Address: "0xaddr1"}, // different tx, real collision
+	}
+
+	collisions, err := db.BatchCheckAndInsertRValues(ctx, txs)
+	if err != nil {
+		t.Fatalf("BatchCheckAndInsertRValues failed: %v", err)
+	}
+
+	if len(collisions) != 1 {
+		t.Fatalf("Expected 1 collision, got %d", len(collisions))
+	}
+
+	c := collisions[0]
+	if c.RValue != "0xr_value_1" {
+		t.Errorf("Expected R value 0xr_value_1, got %s", c.RValue)
+	}
+	if c.TxHash != "0xtx_second" {
+		t.Errorf("Expected new tx hash 0xtx_second, got %s", c.TxHash)
+	}
+	if c.FirstTxRef.TxHash != "0xtx_first" {
+		t.Errorf("Expected first tx hash 0xtx_first, got %s", c.FirstTxRef.TxHash)
+	}
+}
+
+func TestMockDBBatchMixedDuplicatesAndCollisions(t *testing.T) {
+	ctx := context.Background()
+	db := NewMock()
+
+	// Insert initial R values
+	db.CheckAndInsertRValue(ctx, "0xr_dup", "0xtx_dup_original", 1)
+	db.CheckAndInsertRValue(ctx, "0xr_collision", "0xtx_collision_original", 1)
+
+	txs := []TxInput{
+		// Duplicate: same R, same tx hash - should be skipped
+		{RValue: "0xr_dup", TxHash: "0xtx_dup_original", ChainID: 1, Address: "0xaddr1"},
+		// Real collision: same R, different tx hash
+		{RValue: "0xr_collision", TxHash: "0xtx_collision_new", ChainID: 1, Address: "0xaddr2"},
+		// New R value
+		{RValue: "0xr_new", TxHash: "0xtx_new", ChainID: 1, Address: "0xaddr3"},
+	}
+
+	collisions, err := db.BatchCheckAndInsertRValues(ctx, txs)
+	if err != nil {
+		t.Fatalf("BatchCheckAndInsertRValues failed: %v", err)
+	}
+
+	// Should only detect 1 collision (the real one, not the duplicate)
+	if len(collisions) != 1 {
+		t.Fatalf("Expected 1 collision, got %d", len(collisions))
+	}
+
+	if collisions[0].RValue != "0xr_collision" {
+		t.Errorf("Expected collision for 0xr_collision, got %s", collisions[0].RValue)
+	}
+
+	// Verify new R value was inserted
+	stats, _ := db.GetStats(ctx)
+	// 2 original + 1 new = 3 total
+	if stats.TotalRValues != 3 {
+		t.Errorf("Expected 3 R values, got %d", stats.TotalRValues)
+	}
+}
+
+func TestMockDBBatchCaseInsensitiveTxHash(t *testing.T) {
+	ctx := context.Background()
+	db := NewMock()
+
+	// Insert with lowercase tx hash
+	db.CheckAndInsertRValue(ctx, "0xr_value", "0xabcdef", 1)
+
+	// Try with uppercase - should be treated as same tx (duplicate, not collision)
+	txs := []TxInput{
+		{RValue: "0xr_value", TxHash: "0xABCDEF", ChainID: 1, Address: "0xaddr1"},
+	}
+
+	collisions, err := db.BatchCheckAndInsertRValues(ctx, txs)
+	if err != nil {
+		t.Fatalf("BatchCheckAndInsertRValues failed: %v", err)
+	}
+
+	if len(collisions) != 0 {
+		t.Errorf("Expected 0 collisions (case-insensitive match), got %d", len(collisions))
+	}
+}
