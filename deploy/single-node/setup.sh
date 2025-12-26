@@ -101,12 +101,13 @@ log "Starting single-node ECDSA Scanner deployment"
 
 # Update system
 log "Updating system packages..."
+export DEBIAN_FRONTEND=noninteractive
 apt-get update -qq
-apt-get upgrade -y -qq
+apt-get -o Dpkg::Options::="--force-confdef" -o Dpkg::Options::="--force-confold" upgrade -y -qq
 
 # Install dependencies
 log "Installing dependencies..."
-apt-get install -y -qq \
+apt-get -o Dpkg::Options::="--force-confdef" -o Dpkg::Options::="--force-confold" install -y -qq \
     curl \
     ufw \
     git \
