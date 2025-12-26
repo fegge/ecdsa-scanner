@@ -312,6 +312,109 @@ func TestPropertyLinearSystemMultiKey(t *testing.T) {
 	})
 }
 
+// Property: Cyclic cross-key recovery (A-B share k1, B-C share k2, C-A share k3)
+func TestPropertyCyclicCrossKeyRecovery(t *testing.T) {
+	rapid.Check(t, func(t *rapid.T) {
+		// Three keys, three nonces in a cycle:
+		// k1: A and B sign
+		// k2: B and C sign
+		// k3: C and A sign
+		privKeyA := genPrivateKey(t)
+		privKeyB := genPrivateKey(t)
+		privKeyC := genPrivateKey(t)
+
+		k1 := genNonce(t)
+		k2 := genNonce(t)
+		k3 := genNonce(t)
+
+		// Generate 6 different message hashes (one per signature)
+		msgs := make([][]byte, 6)
+		for i := range msgs {
+			msgs[i] = genMessageHash(t)
+			msgs[i][0] = byte(i) // Ensure uniqueness
+		}
+
+		// Sign:
+		// msg0: A with k1
+		// msg1: B with k1
+		// msg2: B with k2
+		// msg3: C with k2
+		// msg4: C with k3
+		// msg5: A with k3
+		r1, sA1 := signWithNonce(privKeyA, msgs[0], k1)
+		_, sB1 := signWithNonce(privKeyB, msgs[1], k1)
+		r2, sB2 := signWithNonce(privKeyB, msgs[2], k2)
+		_, sC2 := signWithNonce(privKeyC, msgs[3], k2)
+		r3, sC3 := signWithNonce(privKeyC, msgs[4], k3)
+		_, sA3 := signWithNonce(privKeyA, msgs[5], k3)
+
+		// Build linear system
+		// ECDSA equation: s * k = z + r * d (mod n)
+		// Rearranged: s * k - r * d = z
+		ls := NewLinearSystem(secp256k1N)
+
+		k1Idx := ls.AddVariable("k1")
+		k2Idx := ls.AddVariable("k2")
+		k3Idx := ls.AddVariable("k3")
+		dAIdx := ls.AddVariable("dA")
+		dBIdx := ls.AddVariable("dB")
+		dCIdx := ls.AddVariable("dC")
+
+		negR1 := new(big.Int).Neg(r1)
+		negR1.Mod(negR1, secp256k1N)
+		negR2 := new(big.Int).Neg(r2)
+		negR2.Mod(negR2, secp256k1N)
+		negR3 := new(big.Int).Neg(r3)
+		negR3.Mod(negR3, secp256k1N)
+
+		zs := make([]*big.Int, 6)
+		for i, msg := range msgs {
+			zs[i] = new(big.Int).SetBytes(msg)
+		}
+
+		// Add equations: s*k - r*d = z
+		ls.AddEquation(map[int]*big.Int{k1Idx: sA1, dAIdx: negR1}, zs[0]) // A with k1
+		ls.AddEquation(map[int]*big.Int{k1Idx: sB1, dBIdx: negR1}, zs[1]) // B with k1
+		ls.AddEquation(map[int]*big.Int{k2Idx: sB2, dBIdx: negR2}, zs[2]) // B with k2
+		ls.AddEquation(map[int]*big.Int{k2Idx: sC2, dCIdx: negR2}, zs[3]) // C with k2
+		ls.AddEquation(map[int]*big.Int{k3Idx: sC3, dCIdx: negR3}, zs[4]) // C with k3
+		ls.AddEquation(map[int]*big.Int{k3Idx: sA3, dAIdx: negR3}, zs[5]) // A with k3
+
+		// 6 equations, 6 unknowns - should be solvable
+		if !ls.CanSolve() {
+			t.Fatalf("system should be solvable: %d eq, %d var",
+				ls.NumEquations(), ls.NumVariables())
+		}
+
+		solutions, err := ls.Solve()
+		if err != nil {
+			t.Fatalf("solve failed: %v", err)
+		}
+
+		// Verify all recovered nonces
+		if solutions["k1"].Cmp(k1) != 0 {
+			t.Fatalf("k1 mismatch")
+		}
+		if solutions["k2"].Cmp(k2) != 0 {
+			t.Fatalf("k2 mismatch")
+		}
+		if solutions["k3"].Cmp(k3) != 0 {
+			t.Fatalf("k3 mismatch")
+		}
+
+		// Verify all recovered private keys
+		if solutions["dA"].Cmp(privKeyA.D) != 0 {
+			t.Fatalf("dA mismatch")
+		}
+		if solutions["dB"].Cmp(privKeyB.D) != 0 {
+			t.Fatalf("dB mismatch")
+		}
+		if solutions["dC"].Cmp(privKeyC.D) != 0 {
+			t.Fatalf("dC mismatch")
+		}
+	})
+}
+
 // Property: Recovery fails with different R values
 func TestPropertyRecoveryFailsDifferentR(t *testing.T) {
 	rapid.Check(t, func(t *rapid.T) {
