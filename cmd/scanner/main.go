@@ -14,6 +14,7 @@ import (
 	"ecdsa-scanner/internal/config"
 	"ecdsa-scanner/internal/db"
 	"ecdsa-scanner/internal/logger"
+	"ecdsa-scanner/internal/notify"
 	"ecdsa-scanner/internal/scanner"
 )
 
@@ -39,8 +40,14 @@ func main() {
 	}
 	defer database.Close()
 
+	// Initialize notifier
+	notifier := notify.New(cfg.PushoverAppToken, cfg.PushoverUserKey)
+	if notifier.IsEnabled() {
+		appLogger.Info("Pushover notifications enabled")
+	}
+
 	// Initialize scanner
-	sc, err := scanner.New(database, appLogger, cfg.AnkrAPIKey)
+	sc, err := scanner.New(database, appLogger, cfg.AnkrAPIKey, notifier)
 	if err != nil {
 		log.Fatalf("Scanner error: %v", err)
 	}

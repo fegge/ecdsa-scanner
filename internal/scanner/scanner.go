@@ -17,6 +17,7 @@ import (
 	"ecdsa-scanner/internal/config"
 	"ecdsa-scanner/internal/db"
 	"ecdsa-scanner/internal/logger"
+	"ecdsa-scanner/internal/notify"
 	"ecdsa-scanner/internal/recovery"
 )
 
@@ -70,6 +71,7 @@ type ChainScanner struct {
 type Scanner struct {
 	db              db.Database
 	logger          *logger.Logger
+	notifier        *notify.Notifier
 	chainScanners   map[int]*ChainScanner // keyed by chainID
 	mu              sync.RWMutex
 	collisionChan   chan CollisionEvent
@@ -79,10 +81,11 @@ type Scanner struct {
 }
 
 // New creates a new Scanner
-func New(database db.Database, log *logger.Logger, ankrAPIKey string) (*Scanner, error) {
+func New(database db.Database, log *logger.Logger, ankrAPIKey string, notifier *notify.Notifier) (*Scanner, error) {
 	s := &Scanner{
 		db:              database,
 		logger:          log,
+		notifier:        notifier,
 		chainScanners:   make(map[int]*ChainScanner),
 		collisionChan:   make(chan CollisionEvent, 10000),
 		recoveryEnabled: true,
@@ -404,7 +407,14 @@ func (s *Scanner) handleCollision(event CollisionEvent) {
 	}
 
 	// Check if same address (same-key reuse - directly recoverable)
-	if strings.EqualFold(tx1Data.From, tx2Data.From) {
+	isSameKey := strings.EqualFold(tx1Data.From, tx2Data.From)
+
+	// Send collision notification
+	if err := s.notifier.NotifyCollision(event.RValue, tx2Data.From, event.NewChainID, isSameKey); err != nil {
+		s.logger.Warn("[NOTIFY] Failed to send collision notification: %v", err)
+	}
+
+	if isSameKey {
 		s.logger.Info("[COLLISION] Same-key reuse detected for %s", tx1Data.From)
 		s.attemptSameKeyRecovery(ctx, event, tx1Data, tx2Data)
 		return
@@ -513,6 +523,15 @@ func (s *Scanner) attemptSameKeyRecovery(ctx context.Context, event CollisionEve
 
 	s.logger.Info("[RECOVERY] *** SUCCESS *** Recovered key for %s", tx1.From)
 
+	// Send push notification
+	chainName := ""
+	if cfg := config.ChainByID(tx1.ChainID); cfg != nil {
+		chainName = cfg.Name
+	}
+	if err := s.notifier.NotifyKeyRecovered(tx1.From, chainName, 2); err != nil {
+		s.logger.Warn("[NOTIFY] Failed to send notification: %v", err)
+	}
+
 	// Only save nonce if it can help recover other keys (cross-key potential)
 	hasCrossKey, _ := s.db.HasCrossKeyPotential(ctx, event.RValue, tx1.From)
 	if hasCrossKey {
@@ -562,6 +581,15 @@ func (s *Scanner) attemptCrossKeyRecoveryWithKnownNonce(ctx context.Context, eve
 	}
 
 	s.logger.Info("[RECOVERY] *** SUCCESS (cross-key) *** Recovered key for %s", txData.From)
+
+	// Send push notification
+	chainName := ""
+	if cfg := config.ChainByID(txData.ChainID); cfg != nil {
+		chainName = cfg.Name
+	}
+	if err := s.notifier.NotifyKeyRecovered(txData.From, chainName, 1); err != nil {
+		s.logger.Warn("[NOTIFY] Failed to send notification: %v", err)
+	}
 }
 
 func (s *Scanner) savePendingComponent(ctx context.Context, event CollisionEvent, tx1, tx2 *TxData) {

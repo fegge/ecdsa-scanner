@@ -6,10 +6,12 @@ import (
 
 // Config holds all application configuration
 type Config struct {
-	DatabaseURL string
-	AnkrAPIKey  string
-	Port        string
-	BindAddrs   string
+	DatabaseURL      string
+	AnkrAPIKey       string
+	Port             string
+	BindAddrs        string
+	PushoverAppToken string
+	PushoverUserKey  string
 }
 
 // ChainConfig defines a blockchain to scan
@@ -44,10 +46,12 @@ func ChainByName(name string) *ChainConfig {
 // Load reads configuration from environment variables
 func Load() *Config {
 	cfg := &Config{
-		DatabaseURL: os.Getenv("DATABASE_URL"),
-		AnkrAPIKey:  os.Getenv("ANKR_API_KEY"),
-		Port:        os.Getenv("PORT"),
-		BindAddrs:   os.Getenv("BIND_ADDRS"),
+		DatabaseURL:      os.Getenv("DATABASE_URL"),
+		AnkrAPIKey:       os.Getenv("ANKR_API_KEY"),
+		Port:             os.Getenv("PORT"),
+		BindAddrs:        os.Getenv("BIND_ADDRS"),
+		PushoverAppToken: os.Getenv("PUSHOVER_APP_TOKEN"),
+		PushoverUserKey:  os.Getenv("PUSHOVER_USER_KEY"),
 	}
 
 	if cfg.Port == "" {
