@@ -146,6 +146,31 @@ Estimated monthly costs (DigitalOcean):
 - Database node (s-1vcpu-2gb): ~$12/month
 - **Total**: ~$18/month
 
+**Note**: The 2-node setup requires additional storage for extended operation. See [Resource Requirements](#resource-requirements) below.
+
+---
+
+## Resource Requirements
+
+The scanner monitors 21 EVM chains, processing ~17 blocks/sec and ~280 transactions/sec.
+
+| Metric | Value |
+|--------|-------|
+| Storage growth | ~2.5 GB/day, ~16 GB/week, ~70 GB/month |
+| Bandwidth | ~10 GB/day, ~300 GB/month |
+| RAM required | 2 GB minimum, 4 GB recommended |
+
+### Recommended Droplets (Single Node)
+
+| Droplet | Cost | Unattended Duration |
+|---------|------|---------------------|
+| `s-1vcpu-2gb` (50 GB) | $12/mo | ~2 weeks |
+| `s-2vcpu-4gb` (80 GB) | $24/mo | ~4 weeks |
+| `s-2vcpu-4gb` + 100GB volume | $34/mo | ~2 months |
+| `s-4vcpu-8gb` (160 GB) | $48/mo | ~2 months |
+
+See [single-node/README.md](single-node/README.md) for detailed sizing guidance.
+
 ---
 
 ## Maintenance
