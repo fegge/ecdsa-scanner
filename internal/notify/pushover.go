@@ -84,22 +84,21 @@ func (n *Notifier) SendWithPriority(title, message string, priority int) error {
 
 // NotifyKeyRecovered sends a high-priority notification for key recovery
 func (n *Notifier) NotifyKeyRecovered(address, chainName string, txCount int) error {
-	title := "🔑 Private Key Recovered!"
-	message := fmt.Sprintf("Address: %s\nChain: %s\nTransactions: %d",
+	title := "ECDSA Scanner"
+	message := fmt.Sprintf("🔑 Private key recovered.\n\nAddress: %s\nChain: %s\nTransactions: %d",
 		shortenAddress(address), chainName, txCount)
 	return n.SendWithPriority(title, message, PriorityHigh)
 }
 
 // NotifyCollision sends a normal-priority notification for R-value collision
 func (n *Notifier) NotifyCollision(rValue, address string, chainID int, isSameKey bool) error {
-	var title, message string
+	title := "ECDSA Scanner"
+	var message string
 	if isSameKey {
-		title = "⚠️ Same-Key Nonce Reuse Detected"
-		message = fmt.Sprintf("Address: %s\nChain ID: %d\nR-value: %s",
+		message = fmt.Sprintf("💥 Same-key R-value collision detected.\n\nAddress: %s\nChain ID: %d\nR-value: %s",
 			shortenAddress(address), chainID, shortenHash(rValue))
 	} else {
-		title = "🔄 Cross-Key R-Value Collision"
-		message = fmt.Sprintf("Chain ID: %d\nR-value: %s",
+		message = fmt.Sprintf("💥 Cross-key R-value collision detected.\n\nChain ID: %d\nR-value: %s",
 			chainID, shortenHash(rValue))
 	}
 	return n.Send(title, message)
