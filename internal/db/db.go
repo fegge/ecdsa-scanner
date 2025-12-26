@@ -121,7 +121,7 @@ func (db *DB) migrate(ctx context.Context) error {
 		CREATE TABLE IF NOT EXISTS r_value_index (
 			r_value BYTEA PRIMARY KEY,
 			tx_hash BYTEA NOT NULL,
-			chain_id SMALLINT NOT NULL
+			chain_id INTEGER NOT NULL
 		);
 
 		-- Track collisions (multiple txs with same R)
@@ -129,7 +129,7 @@ func (db *DB) migrate(ctx context.Context) error {
 			id BIGSERIAL PRIMARY KEY,
 			r_value BYTEA NOT NULL,
 			tx_hash BYTEA NOT NULL,
-			chain_id SMALLINT NOT NULL,
+			chain_id INTEGER NOT NULL,
 			address BYTEA,
 			created_at TIMESTAMPTZ DEFAULT NOW(),
 			UNIQUE(r_value, tx_hash)
@@ -138,7 +138,7 @@ func (db *DB) migrate(ctx context.Context) error {
 
 		-- Scan progress per chain
 		CREATE TABLE IF NOT EXISTS scan_state (
-			chain_id SMALLINT PRIMARY KEY,
+			chain_id INTEGER PRIMARY KEY,
 			last_block BIGINT NOT NULL,
 			updated_at TIMESTAMPTZ DEFAULT NOW()
 		);
@@ -148,7 +148,7 @@ func (db *DB) migrate(ctx context.Context) error {
 			id BIGSERIAL PRIMARY KEY,
 			address BYTEA NOT NULL,
 			private_key BYTEA NOT NULL,
-			chain_id SMALLINT NOT NULL,
+			chain_id INTEGER NOT NULL,
 			r_values BYTEA[] NOT NULL,
 			tx_hashes BYTEA[] NOT NULL,
 			created_at TIMESTAMPTZ DEFAULT NOW(),
@@ -171,7 +171,7 @@ func (db *DB) migrate(ctx context.Context) error {
 			r_values BYTEA[] NOT NULL,
 			tx_hashes BYTEA[] NOT NULL,
 			addresses BYTEA[] NOT NULL,
-			chain_ids SMALLINT[] NOT NULL,
+			chain_ids INTEGER[] NOT NULL,
 			equations INT NOT NULL,
 			unknowns INT NOT NULL,
 			created_at TIMESTAMPTZ DEFAULT NOW(),
