@@ -84,14 +84,16 @@ func New(database db.Database, log *logger.Logger, ankrAPIKey string) (*Scanner,
 		db:              database,
 		logger:          log,
 		chainScanners:   make(map[int]*ChainScanner),
-		collisionChan:   make(chan CollisionEvent, 1000),
+		collisionChan:   make(chan CollisionEvent, 10000),
 		recoveryEnabled: true,
 		ankrAPIKey:      ankrAPIKey,
 		systemAddresses: config.SystemAddresses(),
 	}
 
-	// Start collision processor
-	go s.processCollisions()
+	// Start collision processors (multiple workers to handle RPC latency)
+	for i := 0; i < 5; i++ {
+		go s.processCollisions()
+	}
 
 	// Initialize chain scanners
 	for _, cfg := range config.DefaultChains() {
