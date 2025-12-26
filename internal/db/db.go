@@ -279,9 +279,10 @@ func (db *DB) RecordCollision(ctx context.Context, rValue string, txHash string,
 }
 
 // BatchCheckAndInsertRValues processes multiple transactions in batch.
-// Returns collisions detected (R values that already existed in the index).
+// Returns collisions detected (R values that already existed with a DIFFERENT tx hash).
 // For new R values, inserts them into r_value_index.
 // For collisions, also inserts them into the collisions table.
+// Skips duplicate transactions (same R value and tx hash).
 func (db *DB) BatchCheckAndInsertRValues(ctx context.Context, txs []TxInput) ([]CollisionResult, error) {
 	if len(txs) == 0 {
 		return nil, nil
@@ -303,7 +304,7 @@ func (db *DB) BatchCheckAndInsertRValues(ctx context.Context, txs []TxInput) ([]
 		rValuesBytes[i] = hexToBytes(tx.RValue)
 	}
 
-	// Step 1: Find which R values already exist (these are collisions)
+	// Step 1: Find which R values already exist
 	rows, err := db.conn.QueryContext(ctx,
 		`SELECT r_value, tx_hash, chain_id FROM r_value_index WHERE r_value = ANY($1)`,
 		pq.Array(rValuesBytes))
@@ -323,18 +324,22 @@ func (db *DB) BatchCheckAndInsertRValues(ctx context.Context, txs []TxInput) ([]
 	}
 	rows.Close()
 
-	// Separate into new R values and collisions
+	// Separate into new R values and real collisions (different tx hash)
 	var newTxs []TxInput
 	var collisions []CollisionResult
 	for _, tx := range uniqueTxs {
-		if firstRef, isCollision := existing[tx.RValue]; isCollision {
-			collisions = append(collisions, CollisionResult{
-				RValue:     tx.RValue,
-				TxHash:     tx.TxHash,
-				ChainID:    tx.ChainID,
-				Address:    tx.Address,
-				FirstTxRef: firstRef,
-			})
+		if firstRef, exists := existing[tx.RValue]; exists {
+			// Only count as collision if tx hash is different
+			if !strings.EqualFold(firstRef.TxHash, tx.TxHash) {
+				collisions = append(collisions, CollisionResult{
+					RValue:     tx.RValue,
+					TxHash:     tx.TxHash,
+					ChainID:    tx.ChainID,
+					Address:    tx.Address,
+					FirstTxRef: firstRef,
+				})
+			}
+			// If same tx hash, skip entirely (duplicate)
 		} else {
 			newTxs = append(newTxs, tx)
 		}

@@ -2,6 +2,7 @@ package db
 
 import (
 	"context"
+	"strings"
 	"sync"
 )
 
@@ -122,13 +123,17 @@ func (m *MockDB) BatchCheckAndInsertRValues(ctx context.Context, txs []TxInput) 
 		seen[tx.RValue] = true
 
 		if existing, ok := m.rValues[tx.RValue]; ok {
-			collisions = append(collisions, CollisionResult{
-				RValue:     tx.RValue,
-				TxHash:     tx.TxHash,
-				ChainID:    tx.ChainID,
-				Address:    tx.Address,
-				FirstTxRef: existing,
-			})
+			// Only count as collision if tx hash is different
+			if !strings.EqualFold(existing.TxHash, tx.TxHash) {
+				collisions = append(collisions, CollisionResult{
+					RValue:     tx.RValue,
+					TxHash:     tx.TxHash,
+					ChainID:    tx.ChainID,
+					Address:    tx.Address,
+					FirstTxRef: existing,
+				})
+			}
+			// If same tx hash, skip (duplicate)
 		} else {
 			m.rValues[tx.RValue] = TxRef{TxHash: tx.TxHash, ChainID: tx.ChainID}
 		}
