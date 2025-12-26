@@ -147,33 +147,50 @@ func TestPropertyDeriveNonce(t *testing.T) {
 // Property: Cross-key recovery works when nonce is shared
 func TestPropertyCrossKeyRecovery(t *testing.T) {
 	rapid.Check(t, func(t *rapid.T) {
-		// Two different keys share the same nonce
+		// Two different keys, two different nonces
+		// A signs two messages with k1 (allows recovery of A's key)
+		// A and B each sign one message with k2 (cross-key, allows recovery of B using known k2)
 		privKeyA := genPrivateKey(t)
 		privKeyB := genPrivateKey(t)
-		k := genNonce(t)
+		k1 := genNonce(t)
+		k2 := genNonce(t)
 
+		// Messages for A with k1
 		hashA1 := genMessageHash(t)
 		hashA2 := genMessageHash(t)
+		// Messages for A and B with k2
+		hashA3 := genMessageHash(t)
 		hashB := genMessageHash(t)
 
-		// Ensure different messages for key A
+		// Ensure different messages for key A with k1
 		if string(hashA1) == string(hashA2) {
 			hashA2[0] ^= 0xff
 		}
 
-		// Key A signs two messages with same nonce (recoverable)
-		rA1, sA1 := signWithNonce(privKeyA, hashA1, k)
-		_, sA2 := signWithNonce(privKeyA, hashA2, k)
+		// Key A signs two messages with k1 (same-key reuse, directly recoverable)
+		rA1, sA1 := signWithNonce(privKeyA, hashA1, k1)
+		_, sA2 := signWithNonce(privKeyA, hashA2, k1)
 
-		// Key B signs one message with same nonce
-		rB, sB := signWithNonce(privKeyB, hashB, k)
+		// Key A signs one message with k2
+		rA3, sA3 := signWithNonce(privKeyA, hashA3, k2)
+
+		// Key B signs one message with k2 (cross-key collision with A)
+		rB, sB := signWithNonce(privKeyB, hashB, k2)
+
+		// Verify R values match for shared nonces
+		if rA1.Cmp(rA3) == 0 {
+			t.Skip("k1 and k2 produced same R (astronomically unlikely)")
+		}
+		if rA3.Cmp(rB) != 0 {
+			t.Fatal("k2 should produce same R for both keys")
+		}
 
 		// Skip degenerate cases
 		if sA1.Cmp(sA2) == 0 {
-			t.Skip("identical s values for key A")
+			t.Skip("identical s values for key A with k1")
 		}
 
-		// Step 1: Recover Key A
+		// Step 1: Recover Key A using k1 reuse
 		zA1 := new(big.Int).SetBytes(hashA1)
 		zA2 := new(big.Int).SetBytes(hashA2)
 
@@ -182,23 +199,25 @@ func TestPropertyCrossKeyRecovery(t *testing.T) {
 			t.Fatalf("Key A recovery failed: %v", err)
 		}
 
-		// Step 2: Derive nonce from Key A's signature
-		derivedK := DeriveNonce(zA1, rA1, sA1, recoveredPrivA)
+		// Verify Key A recovery
+		expectedAddrA := crypto.PubkeyToAddress(privKeyA.PublicKey).Hex()
+		if !VerifyPrivateKey(recoveredPrivA, expectedAddrA) {
+			t.Fatalf("Key A mismatch")
+		}
 
-		// Step 3: Use known nonce to recover Key B
+		// Step 2: Derive k2 from Key A's signature with k2
+		zA3 := new(big.Int).SetBytes(hashA3)
+		derivedK2 := DeriveNonce(zA3, rA3, sA3, recoveredPrivA)
+
+		// Step 3: Use known k2 to recover Key B
 		zB := new(big.Int).SetBytes(hashB)
-		recoveredPrivB, err := RecoverWithKnownNonce(zB, rB, sB, derivedK)
+		recoveredPrivB, err := RecoverWithKnownNonce(zB, rB, sB, derivedK2)
 		if err != nil {
 			t.Fatalf("Key B recovery failed: %v", err)
 		}
 
-		// Verify both recoveries
-		expectedAddrA := crypto.PubkeyToAddress(privKeyA.PublicKey).Hex()
+		// Verify Key B recovery
 		expectedAddrB := crypto.PubkeyToAddress(privKeyB.PublicKey).Hex()
-
-		if !VerifyPrivateKey(recoveredPrivA, expectedAddrA) {
-			t.Fatalf("Key A mismatch")
-		}
 		if !VerifyPrivateKey(recoveredPrivB, expectedAddrB) {
 			t.Fatalf("Key B mismatch")
 		}
