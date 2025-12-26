@@ -272,7 +272,7 @@ if [[ "$SKIP_TAILSCALE" == false ]]; then
     cat > /etc/ssh/sshd_config.d/tailscale-only.conf <<EOF
 ListenAddress $TAILSCALE_IP
 EOF
-    systemctl restart sshd
+    systemctl restart ssh
 fi
 
 # Print summary
