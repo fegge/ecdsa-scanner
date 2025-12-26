@@ -324,6 +324,8 @@ func (s *Scanner) scanBlock(cs *ChainScanner, ctx context.Context, blockNum uint
 		return err
 	}
 
+	// Collect all valid transactions for batch processing
+	var txInputs []db.TxInput
 	for _, tx := range block.Transactions {
 		if tx.R == "" || tx.R == "0x0" || tx.From == "" {
 			continue
@@ -331,32 +333,37 @@ func (s *Scanner) scanBlock(cs *ChainScanner, ctx context.Context, blockNum uint
 		if s.systemAddresses[strings.ToLower(tx.From)] {
 			continue
 		}
+		txInputs = append(txInputs, db.TxInput{
+			RValue:  strings.ToLower(tx.R),
+			TxHash:  strings.ToLower(tx.Hash),
+			ChainID: cs.config.ChainID,
+			Address: strings.ToLower(tx.From),
+		})
+	}
 
-		// Check for collision
-		existing, isCollision, err := s.db.CheckAndInsertRValue(ctx,
-			strings.ToLower(tx.R), strings.ToLower(tx.Hash), cs.config.ChainID)
-		if err != nil {
-			s.logger.Warn("[%s] DB error: %v", cs.config.Name, err)
-			continue
-		}
+	if len(txInputs) == 0 {
+		return nil
+	}
 
-		if isCollision {
-			// Record the collision
-			s.db.RecordCollision(ctx, strings.ToLower(tx.R), strings.ToLower(tx.Hash),
-				cs.config.ChainID, strings.ToLower(tx.From))
+	// Batch check and insert all R values
+	collisions, err := s.db.BatchCheckAndInsertRValues(ctx, txInputs)
+	if err != nil {
+		s.logger.Warn("[%s] DB batch error: %v", cs.config.Name, err)
+		return err
+	}
 
-			// Queue for processing
-			select {
-			case s.collisionChan <- CollisionEvent{
-				RValue:     strings.ToLower(tx.R),
-				NewTxHash:  strings.ToLower(tx.Hash),
-				NewChainID: cs.config.ChainID,
-				NewAddress: strings.ToLower(tx.From),
-				FirstTxRef: *existing,
-			}:
-			default:
-				s.logger.Warn("Collision queue full")
-			}
+	// Queue collisions for processing
+	for _, c := range collisions {
+		select {
+		case s.collisionChan <- CollisionEvent{
+			RValue:     c.RValue,
+			NewTxHash:  c.TxHash,
+			NewChainID: c.ChainID,
+			NewAddress: c.Address,
+			FirstTxRef: c.FirstTxRef,
+		}:
+		default:
+			s.logger.Warn("Collision queue full")
 		}
 	}
 

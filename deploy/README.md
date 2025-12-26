@@ -1,6 +1,26 @@
 # ECDSA Scanner Deployment
 
-Terraform configuration to deploy the ECDSA Scanner with PostgreSQL on DigitalOcean, secured with Tailscale.
+Deployment options for ECDSA Scanner, all secured with Tailscale.
+
+## Deployment Options
+
+| Option | Best For | Cost | Setup Time |
+|--------|----------|------|------------|
+| [Single Node](single-node/) | Personal use, testing | ~$6-24/mo | 5 minutes |
+| [Terraform (2 nodes)](terraform/) | Production, separation of concerns | ~$18/mo | 10 minutes |
+
+## Quick Start (Single Node)
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/fegge/ecdsa-scanner/main/deploy/single-node/setup.sh | \
+  sudo bash -s -- --tailscale-key tskey-auth-xxxxx
+```
+
+See [single-node/README.md](single-node/README.md) for details.
+
+---
+
+## Terraform Deployment (2 Nodes)
 
 ## Architecture
 

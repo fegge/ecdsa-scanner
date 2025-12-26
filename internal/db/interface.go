@@ -2,6 +2,23 @@ package db
 
 import "context"
 
+// TxInput represents a transaction to check for R-value collision
+type TxInput struct {
+	RValue  string
+	TxHash  string
+	ChainID int
+	Address string
+}
+
+// CollisionResult represents a detected collision from batch processing
+type CollisionResult struct {
+	RValue     string
+	TxHash     string
+	ChainID    int
+	Address    string
+	FirstTxRef TxRef // The original tx that has this R value
+}
+
 // Database defines the interface for database operations
 type Database interface {
 	Close() error
@@ -10,6 +27,7 @@ type Database interface {
 	// R-value collision detection
 	CheckAndInsertRValue(ctx context.Context, rValue, txHash string, chainID int) (*TxRef, bool, error)
 	RecordCollision(ctx context.Context, rValue, txHash string, chainID int, address string) error
+	BatchCheckAndInsertRValues(ctx context.Context, txs []TxInput) ([]CollisionResult, error)
 	GetCollisionTxRefs(ctx context.Context, rValue string) ([]TxRef, error)
 	GetAllCollisions(ctx context.Context) ([]Collision, error)
 	HasCrossKeyPotential(ctx context.Context, rValue, excludeAddress string) (bool, error)

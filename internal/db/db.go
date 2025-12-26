@@ -278,6 +278,106 @@ func (db *DB) RecordCollision(ctx context.Context, rValue string, txHash string,
 	return db.wrapError(err)
 }
 
+// BatchCheckAndInsertRValues processes multiple transactions in batch.
+// Returns collisions detected (R values that already existed in the index).
+// For new R values, inserts them into r_value_index.
+// For collisions, also inserts them into the collisions table.
+func (db *DB) BatchCheckAndInsertRValues(ctx context.Context, txs []TxInput) ([]CollisionResult, error) {
+	if len(txs) == 0 {
+		return nil, nil
+	}
+
+	// Deduplicate by R value within the batch (keep first occurrence)
+	seen := make(map[string]int) // r_value -> index in txs
+	var uniqueTxs []TxInput
+	for _, tx := range txs {
+		if _, exists := seen[tx.RValue]; !exists {
+			seen[tx.RValue] = len(uniqueTxs)
+			uniqueTxs = append(uniqueTxs, tx)
+		}
+	}
+
+	// Build array of R values to check
+	rValuesBytes := make([][]byte, len(uniqueTxs))
+	for i, tx := range uniqueTxs {
+		rValuesBytes[i] = hexToBytes(tx.RValue)
+	}
+
+	// Step 1: Find which R values already exist (these are collisions)
+	rows, err := db.conn.QueryContext(ctx,
+		`SELECT r_value, tx_hash, chain_id FROM r_value_index WHERE r_value = ANY($1)`,
+		pq.Array(rValuesBytes))
+	if err != nil {
+		return nil, db.wrapError(err)
+	}
+
+	existing := make(map[string]TxRef) // r_value hex -> first tx ref
+	for rows.Next() {
+		var rValue, txHash []byte
+		var chainID int
+		if err := rows.Scan(&rValue, &txHash, &chainID); err != nil {
+			rows.Close()
+			return nil, db.wrapError(err)
+		}
+		existing[bytesToHex(rValue)] = TxRef{TxHash: bytesToHex(txHash), ChainID: chainID}
+	}
+	rows.Close()
+
+	// Separate into new R values and collisions
+	var newTxs []TxInput
+	var collisions []CollisionResult
+	for _, tx := range uniqueTxs {
+		if firstRef, isCollision := existing[tx.RValue]; isCollision {
+			collisions = append(collisions, CollisionResult{
+				RValue:     tx.RValue,
+				TxHash:     tx.TxHash,
+				ChainID:    tx.ChainID,
+				Address:    tx.Address,
+				FirstTxRef: firstRef,
+			})
+		} else {
+			newTxs = append(newTxs, tx)
+		}
+	}
+
+	// Step 2: Batch insert new R values into r_value_index
+	if len(newTxs) > 0 {
+		// Build VALUES clause for batch insert
+		valueStrings := make([]string, len(newTxs))
+		valueArgs := make([]interface{}, 0, len(newTxs)*3)
+		for i, tx := range newTxs {
+			valueStrings[i] = fmt.Sprintf("($%d, $%d, $%d)", i*3+1, i*3+2, i*3+3)
+			valueArgs = append(valueArgs, hexToBytes(tx.RValue), hexToBytes(tx.TxHash), tx.ChainID)
+		}
+		query := fmt.Sprintf(
+			`INSERT INTO r_value_index (r_value, tx_hash, chain_id) VALUES %s ON CONFLICT DO NOTHING`,
+			strings.Join(valueStrings, ", "))
+		_, err = db.conn.ExecContext(ctx, query, valueArgs...)
+		if err != nil {
+			return nil, db.wrapError(err)
+		}
+	}
+
+	// Step 3: Batch insert collisions into collisions table
+	if len(collisions) > 0 {
+		valueStrings := make([]string, len(collisions))
+		valueArgs := make([]interface{}, 0, len(collisions)*4)
+		for i, c := range collisions {
+			valueStrings[i] = fmt.Sprintf("($%d, $%d, $%d, $%d)", i*4+1, i*4+2, i*4+3, i*4+4)
+			valueArgs = append(valueArgs, hexToBytes(c.RValue), hexToBytes(c.TxHash), c.ChainID, hexToBytes(c.Address))
+		}
+		query := fmt.Sprintf(
+			`INSERT INTO collisions (r_value, tx_hash, chain_id, address) VALUES %s ON CONFLICT DO NOTHING`,
+			strings.Join(valueStrings, ", "))
+		_, err = db.conn.ExecContext(ctx, query, valueArgs...)
+		if err != nil {
+			return nil, db.wrapError(err)
+		}
+	}
+
+	return collisions, nil
+}
+
 // GetCollisionTxRefs returns all transaction references for a given R value
 func (db *DB) GetCollisionTxRefs(ctx context.Context, rValue string) ([]TxRef, error) {
 	rBytes := hexToBytes(rValue)

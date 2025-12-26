@@ -112,3 +112,87 @@ func TestMockDB(t *testing.T) {
 		t.Errorf("Expected 1 recovered key, got %d", stats.RecoveredKeys)
 	}
 }
+
+func TestMockDBBatchCheckAndInsertRValues(t *testing.T) {
+	ctx := context.Background()
+	db := NewMock()
+
+	// Insert some initial R values
+	db.CheckAndInsertRValue(ctx, "0xexisting1", "0xtx_old1", 1)
+	db.CheckAndInsertRValue(ctx, "0xexisting2", "0xtx_old2", 137)
+
+	// Batch insert with mix of new and existing R values
+	txs := []TxInput{
+		{RValue: "0xnew1", TxHash: "0xtx_new1", ChainID: 1, Address: "0xaddr1"},
+		{RValue: "0xexisting1", TxHash: "0xtx_collision1", ChainID: 1, Address: "0xaddr2"}, // collision
+		{RValue: "0xnew2", TxHash: "0xtx_new2", ChainID: 42, Address: "0xaddr3"},
+		{RValue: "0xexisting2", TxHash: "0xtx_collision2", ChainID: 137, Address: "0xaddr4"}, // collision
+		{RValue: "0xnew1", TxHash: "0xtx_dup", ChainID: 1, Address: "0xaddr5"},             // duplicate in batch (should be ignored)
+	}
+
+	collisions, err := db.BatchCheckAndInsertRValues(ctx, txs)
+	if err != nil {
+		t.Fatalf("BatchCheckAndInsertRValues failed: %v", err)
+	}
+
+	// Should detect 2 collisions
+	if len(collisions) != 2 {
+		t.Errorf("Expected 2 collisions, got %d", len(collisions))
+	}
+
+	// Verify collision details
+	collisionMap := make(map[string]CollisionResult)
+	for _, c := range collisions {
+		collisionMap[c.RValue] = c
+	}
+
+	if c, ok := collisionMap["0xexisting1"]; !ok {
+		t.Error("Expected collision for 0xexisting1")
+	} else {
+		if c.FirstTxRef.TxHash != "0xtx_old1" {
+			t.Errorf("Expected first tx ref 0xtx_old1, got %s", c.FirstTxRef.TxHash)
+		}
+		if c.TxHash != "0xtx_collision1" {
+			t.Errorf("Expected collision tx 0xtx_collision1, got %s", c.TxHash)
+		}
+	}
+
+	if c, ok := collisionMap["0xexisting2"]; !ok {
+		t.Error("Expected collision for 0xexisting2")
+	} else {
+		if c.FirstTxRef.TxHash != "0xtx_old2" {
+			t.Errorf("Expected first tx ref 0xtx_old2, got %s", c.FirstTxRef.TxHash)
+		}
+	}
+
+	// Verify new R values were inserted
+	stats, _ := db.GetStats(ctx)
+	// 2 original + 2 new = 4 total
+	if stats.TotalRValues != 4 {
+		t.Errorf("Expected 4 R values, got %d", stats.TotalRValues)
+	}
+
+	// Verify new R values exist and would cause collision on next insert
+	_, isCollision, _ := db.CheckAndInsertRValue(ctx, "0xnew1", "0xanother", 1)
+	if !isCollision {
+		t.Error("Expected 0xnew1 to exist and cause collision")
+	}
+
+	_, isCollision, _ = db.CheckAndInsertRValue(ctx, "0xnew2", "0xanother", 42)
+	if !isCollision {
+		t.Error("Expected 0xnew2 to exist and cause collision")
+	}
+}
+
+func TestMockDBBatchEmpty(t *testing.T) {
+	ctx := context.Background()
+	db := NewMock()
+
+	collisions, err := db.BatchCheckAndInsertRValues(ctx, []TxInput{})
+	if err != nil {
+		t.Fatalf("BatchCheckAndInsertRValues failed: %v", err)
+	}
+	if len(collisions) != 0 {
+		t.Errorf("Expected 0 collisions for empty input, got %d", len(collisions))
+	}
+}

@@ -108,6 +108,35 @@ func (m *MockDB) RecordCollision(ctx context.Context, rValue, txHash string, cha
 	return nil
 }
 
+func (m *MockDB) BatchCheckAndInsertRValues(ctx context.Context, txs []TxInput) ([]CollisionResult, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	var collisions []CollisionResult
+	seen := make(map[string]bool)
+
+	for _, tx := range txs {
+		if seen[tx.RValue] {
+			continue
+		}
+		seen[tx.RValue] = true
+
+		if existing, ok := m.rValues[tx.RValue]; ok {
+			collisions = append(collisions, CollisionResult{
+				RValue:     tx.RValue,
+				TxHash:     tx.TxHash,
+				ChainID:    tx.ChainID,
+				Address:    tx.Address,
+				FirstTxRef: existing,
+			})
+		} else {
+			m.rValues[tx.RValue] = TxRef{TxHash: tx.TxHash, ChainID: tx.ChainID}
+		}
+	}
+
+	return collisions, nil
+}
+
 func (m *MockDB) GetCollisionTxRefs(ctx context.Context, rValue string) ([]TxRef, error) {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
