@@ -277,7 +277,19 @@ func (s *Scanner) scanLoop(cs *ChainScanner) {
 			s.logger.Info("[%s] Block %d, %d behind", chainName, nextBlock, latestBlock-nextBlock)
 		}
 
-		time.Sleep(50 * time.Millisecond)
+		// Dynamic rate limiting: slow down when caught up
+		blocksBehind := latestBlock - nextBlock
+		if blocksBehind < 2 {
+			// Nearly caught up - wait for block time to avoid unnecessary requests
+			blockTime := cs.config.BlockTime
+			if blockTime == 0 {
+				blockTime = 2 * time.Second // default
+			}
+			time.Sleep(blockTime)
+		} else {
+			// Catching up - minimal delay
+			time.Sleep(50 * time.Millisecond)
+		}
 	}
 }
 
