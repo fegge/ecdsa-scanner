@@ -106,7 +106,7 @@ func (n *Notifier) NotifyCollision(rValue, address string, chainID int, isSameKe
 
 // SendTest sends a test notification to verify the integration
 func (n *Notifier) SendTest() error {
-	return n.SendWithPriority("ECDSA Scanner", "✅ Test notification - Pushover integration is working!", PriorityHigh)
+	return n.SendWithPriority("ECDSA Scanner", "🙌 Pushover integration works.", PriorityHigh)
 }
 
 // shortenAddress returns a shortened address (0x1234...5678)
