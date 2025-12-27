@@ -57,14 +57,16 @@ type ChainStats struct {
 
 // ChainScanner handles scanning for a single chain
 type ChainScanner struct {
-	config    config.ChainConfig
-	client    *rpc.Client
-	ethClient *ethclient.Client
-	running   bool
-	stopChan  chan struct{}
-	mu        sync.Mutex
-	stats     ChainStats
-	errCount  int
+	config          config.ChainConfig
+	client          *rpc.Client
+	ethClient       *ethclient.Client
+	running         bool
+	stopChan        chan struct{}
+	mu              sync.Mutex
+	stats           ChainStats
+	errCount        int
+	lastNewBlockAt  time.Time     // when we last saw a new block from the chain
+	estBlockTime    time.Duration // estimated block time based on observations
 }
 
 // Scanner coordinates scanning across all chains
@@ -245,11 +247,39 @@ func (s *Scanner) scanLoop(cs *ChainScanner) {
 		}
 
 		cs.mu.Lock()
+		prevLatest := cs.stats.LatestBlock
 		cs.stats.LatestBlock = latestBlock
 		cs.mu.Unlock()
 
+		// Track when chain produces new blocks to estimate block time
+		if latestBlock > prevLatest && prevLatest > 0 {
+			now := time.Now()
+			cs.mu.Lock()
+			if !cs.lastNewBlockAt.IsZero() {
+				observed := now.Sub(cs.lastNewBlockAt) / time.Duration(latestBlock-prevLatest)
+				if cs.estBlockTime == 0 {
+					cs.estBlockTime = observed
+				} else {
+					// Exponential moving average (0.3 weight for new observation)
+					cs.estBlockTime = (cs.estBlockTime*7 + observed*3) / 10
+				}
+			}
+			cs.lastNewBlockAt = now
+			cs.mu.Unlock()
+		}
+
 		if lastBlock >= latestBlock {
-			time.Sleep(3 * time.Second)
+			// Caught up - wait based on estimated block time
+			cs.mu.Lock()
+			waitTime := cs.estBlockTime
+			cs.mu.Unlock()
+			if waitTime < 500*time.Millisecond {
+				waitTime = 500 * time.Millisecond
+			}
+			if waitTime > 15*time.Second {
+				waitTime = 15 * time.Second
+			}
+			time.Sleep(waitTime)
 			continue
 		}
 
@@ -277,15 +307,19 @@ func (s *Scanner) scanLoop(cs *ChainScanner) {
 			s.logger.Info("[%s] Block %d, %d behind", chainName, nextBlock, latestBlock-nextBlock)
 		}
 
-		// Dynamic rate limiting: slow down when caught up
+		// Dynamic rate limiting: slow down when nearly caught up
 		blocksBehind := latestBlock - nextBlock
 		if blocksBehind < 2 {
-			// Nearly caught up - wait for block time to avoid unnecessary requests
-			blockTime := cs.config.BlockTime
-			if blockTime == 0 {
-				blockTime = 2 * time.Second // default
+			cs.mu.Lock()
+			waitTime := cs.estBlockTime
+			cs.mu.Unlock()
+			if waitTime < 500*time.Millisecond {
+				waitTime = 500 * time.Millisecond
 			}
-			time.Sleep(blockTime)
+			if waitTime > 15*time.Second {
+				waitTime = 15 * time.Second
+			}
+			time.Sleep(waitTime)
 		} else {
 			// Catching up - minimal delay
 			time.Sleep(50 * time.Millisecond)

@@ -2,7 +2,6 @@ package config
 
 import (
 	"os"
-	"time"
 )
 
 // Config holds all application configuration
@@ -22,7 +21,6 @@ type ChainConfig struct {
 	RPCURL      string
 	ExplorerURL string
 	Enabled     bool
-	BlockTime   time.Duration // Average block time for rate limiting
 }
 
 // ChainByID returns chain config by ID
@@ -70,29 +68,29 @@ func Load() *Config {
 func DefaultChains() []ChainConfig {
 	return []ChainConfig{
 		// Original chains
-		{Name: "Ethereum", ChainID: 1, RPCURL: "https://rpc.ankr.com/eth", ExplorerURL: "https://etherscan.io", Enabled: true, BlockTime: 12 * time.Second},
-		{Name: "BSC", ChainID: 56, RPCURL: "https://rpc.ankr.com/bsc", ExplorerURL: "https://bscscan.com", Enabled: true, BlockTime: 3 * time.Second},
-		{Name: "Polygon", ChainID: 137, RPCURL: "https://rpc.ankr.com/polygon", ExplorerURL: "https://polygonscan.com", Enabled: true, BlockTime: 2 * time.Second},
-		{Name: "Arbitrum", ChainID: 42161, RPCURL: "https://rpc.ankr.com/arbitrum", ExplorerURL: "https://arbiscan.io", Enabled: true, BlockTime: 250 * time.Millisecond},
-		{Name: "Avalanche", ChainID: 43114, RPCURL: "https://rpc.ankr.com/avalanche", ExplorerURL: "https://snowtrace.io", Enabled: true, BlockTime: 2 * time.Second},
-		{Name: "Fantom", ChainID: 250, RPCURL: "https://rpc.ankr.com/fantom", ExplorerURL: "https://ftmscan.com", Enabled: true, BlockTime: 1 * time.Second},
-		{Name: "Optimism", ChainID: 10, RPCURL: "https://rpc.ankr.com/optimism", ExplorerURL: "https://optimistic.etherscan.io", Enabled: true, BlockTime: 2 * time.Second},
-		{Name: "Base", ChainID: 8453, RPCURL: "https://rpc.ankr.com/base", ExplorerURL: "https://basescan.org", Enabled: true, BlockTime: 2 * time.Second},
-		{Name: "zkSync", ChainID: 324, RPCURL: "https://rpc.ankr.com/zksync_era", ExplorerURL: "https://explorer.zksync.io", Enabled: true, BlockTime: 1 * time.Second},
-		{Name: "Gnosis", ChainID: 100, RPCURL: "https://rpc.ankr.com/gnosis", ExplorerURL: "https://gnosisscan.io", Enabled: true, BlockTime: 5 * time.Second},
-		{Name: "Celo", ChainID: 42220, RPCURL: "https://rpc.ankr.com/celo", ExplorerURL: "https://celoscan.io", Enabled: true, BlockTime: 5 * time.Second},
+		{Name: "Ethereum", ChainID: 1, RPCURL: "https://rpc.ankr.com/eth", ExplorerURL: "https://etherscan.io", Enabled: true},
+		{Name: "BSC", ChainID: 56, RPCURL: "https://rpc.ankr.com/bsc", ExplorerURL: "https://bscscan.com", Enabled: true},
+		{Name: "Polygon", ChainID: 137, RPCURL: "https://rpc.ankr.com/polygon", ExplorerURL: "https://polygonscan.com", Enabled: true},
+		{Name: "Arbitrum", ChainID: 42161, RPCURL: "https://rpc.ankr.com/arbitrum", ExplorerURL: "https://arbiscan.io", Enabled: true},
+		{Name: "Avalanche", ChainID: 43114, RPCURL: "https://rpc.ankr.com/avalanche", ExplorerURL: "https://snowtrace.io", Enabled: true},
+		{Name: "Fantom", ChainID: 250, RPCURL: "https://rpc.ankr.com/fantom", ExplorerURL: "https://ftmscan.com", Enabled: true},
+		{Name: "Optimism", ChainID: 10, RPCURL: "https://rpc.ankr.com/optimism", ExplorerURL: "https://optimistic.etherscan.io", Enabled: true},
+		{Name: "Base", ChainID: 8453, RPCURL: "https://rpc.ankr.com/base", ExplorerURL: "https://basescan.org", Enabled: true},
+		{Name: "zkSync", ChainID: 324, RPCURL: "https://rpc.ankr.com/zksync_era", ExplorerURL: "https://explorer.zksync.io", Enabled: true},
+		{Name: "Gnosis", ChainID: 100, RPCURL: "https://rpc.ankr.com/gnosis", ExplorerURL: "https://gnosisscan.io", Enabled: true},
+		{Name: "Celo", ChainID: 42220, RPCURL: "https://rpc.ankr.com/celo", ExplorerURL: "https://celoscan.io", Enabled: true},
 		// High priority L2s
-		{Name: "Linea", ChainID: 59144, RPCURL: "https://rpc.ankr.com/linea", ExplorerURL: "https://lineascan.build", Enabled: true, BlockTime: 2 * time.Second},
-		{Name: "Scroll", ChainID: 534352, RPCURL: "https://rpc.ankr.com/scroll", ExplorerURL: "https://scrollscan.com", Enabled: true, BlockTime: 3 * time.Second},
-		{Name: "Mantle", ChainID: 5000, RPCURL: "https://rpc.ankr.com/mantle", ExplorerURL: "https://mantlescan.xyz", Enabled: true, BlockTime: 2 * time.Second},
-		{Name: "Blast", ChainID: 81457, RPCURL: "https://rpc.ankr.com/blast", ExplorerURL: "https://blastscan.io", Enabled: true, BlockTime: 2 * time.Second},
-		{Name: "Arbitrum Nova", ChainID: 42170, RPCURL: "https://rpc.ankr.com/arbitrumnova", ExplorerURL: "https://nova.arbiscan.io", Enabled: true, BlockTime: 250 * time.Millisecond},
+		{Name: "Linea", ChainID: 59144, RPCURL: "https://rpc.ankr.com/linea", ExplorerURL: "https://lineascan.build", Enabled: true},
+		{Name: "Scroll", ChainID: 534352, RPCURL: "https://rpc.ankr.com/scroll", ExplorerURL: "https://scrollscan.com", Enabled: true},
+		{Name: "Mantle", ChainID: 5000, RPCURL: "https://rpc.ankr.com/mantle", ExplorerURL: "https://mantlescan.xyz", Enabled: true},
+		{Name: "Blast", ChainID: 81457, RPCURL: "https://rpc.ankr.com/blast", ExplorerURL: "https://blastscan.io", Enabled: true},
+		{Name: "Arbitrum Nova", ChainID: 42170, RPCURL: "https://rpc.ankr.com/arbitrumnova", ExplorerURL: "https://nova.arbiscan.io", Enabled: true},
 		// Medium priority chains
-		{Name: "Moonbeam", ChainID: 1284, RPCURL: "https://rpc.ankr.com/moonbeam", ExplorerURL: "https://moonscan.io", Enabled: true, BlockTime: 12 * time.Second},
-		{Name: "Metis", ChainID: 1088, RPCURL: "https://rpc.ankr.com/metis", ExplorerURL: "https://andromeda-explorer.metis.io", Enabled: true, BlockTime: 2 * time.Second},
-		{Name: "Kaia", ChainID: 8217, RPCURL: "https://rpc.ankr.com/kaia", ExplorerURL: "https://kaiascan.io", Enabled: true, BlockTime: 1 * time.Second},
-		{Name: "Harmony", ChainID: 1666600000, RPCURL: "https://rpc.ankr.com/harmony", ExplorerURL: "https://explorer.harmony.one", Enabled: true, BlockTime: 2 * time.Second},
-		{Name: "IoTeX", ChainID: 4689, RPCURL: "https://rpc.ankr.com/iotex", ExplorerURL: "https://iotexscan.io", Enabled: true, BlockTime: 5 * time.Second},
+		{Name: "Moonbeam", ChainID: 1284, RPCURL: "https://rpc.ankr.com/moonbeam", ExplorerURL: "https://moonscan.io", Enabled: true},
+		{Name: "Metis", ChainID: 1088, RPCURL: "https://rpc.ankr.com/metis", ExplorerURL: "https://andromeda-explorer.metis.io", Enabled: true},
+		{Name: "Kaia", ChainID: 8217, RPCURL: "https://rpc.ankr.com/kaia", ExplorerURL: "https://kaiascan.io", Enabled: true},
+		{Name: "Harmony", ChainID: 1666600000, RPCURL: "https://rpc.ankr.com/harmony", ExplorerURL: "https://explorer.harmony.one", Enabled: true},
+		{Name: "IoTeX", ChainID: 4689, RPCURL: "https://rpc.ankr.com/iotex", ExplorerURL: "https://iotexscan.io", Enabled: true},
 	}
 }
 
