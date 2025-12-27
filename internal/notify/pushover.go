@@ -90,7 +90,7 @@ func (n *Notifier) NotifyKeyRecovered(address, chainName string, txCount int) er
 	return n.SendWithPriority(title, message, PriorityHigh)
 }
 
-// NotifyCollision sends a normal-priority notification for R-value collision
+// NotifyCollision sends a high-priority notification for R-value collision
 func (n *Notifier) NotifyCollision(rValue, address string, chainID int, isSameKey bool) error {
 	title := "ECDSA Scanner"
 	var message string
@@ -101,7 +101,12 @@ func (n *Notifier) NotifyCollision(rValue, address string, chainID int, isSameKe
 		message = fmt.Sprintf("💥 Cross-key R-value collision detected.\n\nChain ID: %d\nR-value: %s",
 			chainID, shortenHash(rValue))
 	}
-	return n.Send(title, message)
+	return n.SendWithPriority(title, message, PriorityHigh)
+}
+
+// SendTest sends a test notification to verify the integration
+func (n *Notifier) SendTest() error {
+	return n.SendWithPriority("ECDSA Scanner", "✅ Test notification - Pushover integration is working!", PriorityHigh)
 }
 
 // shortenAddress returns a shortened address (0x1234...5678)

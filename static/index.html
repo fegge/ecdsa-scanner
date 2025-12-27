@@ -431,6 +431,13 @@
             </div>
 
             <div class="section">
+                <h2>Notifications</h2>
+                <p style="color: #888; margin-bottom: 10px;">Test your Pushover notification integration.</p>
+                <button id="testNotificationBtn" onclick="sendTestNotification()">Send Test Notification</button>
+                <span id="notificationStatus" style="margin-left: 10px;"></span>
+            </div>
+
+            <div class="section">
                 <h2>System Logs</h2>
                 <div class="log-container" id="logContainer"></div>
             </div>
@@ -842,6 +849,34 @@
         async function toggleAutoRecovery() {
             await fetch('/api/recovery/toggle', { method: 'POST' });
             fetchStats();
+        }
+
+        async function sendTestNotification() {
+            const btn = document.getElementById('testNotificationBtn');
+            const status = document.getElementById('notificationStatus');
+            
+            btn.disabled = true;
+            btn.textContent = 'Sending...';
+            status.textContent = '';
+            
+            try {
+                const resp = await fetch('/api/notifications/test', { method: 'POST' });
+                const result = await resp.json();
+                
+                if (result.success) {
+                    status.textContent = '✓ Notification sent!';
+                    status.style.color = '#2ecc71';
+                } else {
+                    status.textContent = '✗ ' + (result.error || 'Failed');
+                    status.style.color = '#e74c3c';
+                }
+            } catch (e) {
+                status.textContent = '✗ Request failed';
+                status.style.color = '#e74c3c';
+            }
+            
+            btn.disabled = false;
+            btn.textContent = 'Send Test Notification';
         }
 
         // Initial load and refresh

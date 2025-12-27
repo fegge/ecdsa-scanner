@@ -14,6 +14,7 @@ import (
 	"ecdsa-scanner/internal/config"
 	"ecdsa-scanner/internal/db"
 	"ecdsa-scanner/internal/logger"
+	"ecdsa-scanner/internal/notify"
 	"ecdsa-scanner/internal/scanner"
 )
 
@@ -50,15 +51,17 @@ type Handler struct {
 	db         db.Database
 	logger     *logger.Logger
 	ankrAPIKey string
+	notifier   *notify.Notifier
 }
 
 // NewHandler creates a new API handler
-func NewHandler(s *scanner.Scanner, database db.Database, log *logger.Logger, ankrAPIKey string) *Handler {
+func NewHandler(s *scanner.Scanner, database db.Database, log *logger.Logger, ankrAPIKey string, notifier *notify.Notifier) *Handler {
 	return &Handler{
 		scanner:    s,
 		db:         database,
 		logger:     log,
 		ankrAPIKey: ankrAPIKey,
+		notifier:   notifier,
 	}
 }
 
@@ -75,6 +78,7 @@ func (h *Handler) RegisterRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/api/start", h.handleStart)
 	mux.HandleFunc("/api/stop", h.handleStop)
 	mux.HandleFunc("/api/logs", h.handleLogs)
+	mux.HandleFunc("/api/notifications/test", h.handleTestNotification)
 }
 
 func (h *Handler) serveIndex(w http.ResponseWriter, r *http.Request) {
@@ -364,4 +368,36 @@ func (h *Handler) handleStop(w http.ResponseWriter, r *http.Request) {
 func (h *Handler) handleLogs(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(h.logger.GetEntries())
+}
+
+func (h *Handler) handleTestNotification(w http.ResponseWriter, r *http.Request) {
+	if r.Method != "POST" {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+
+	if h.notifier == nil || !h.notifier.IsEnabled() {
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"success": false,
+			"error":   "Pushover notifications not configured",
+		})
+		return
+	}
+
+	err := h.notifier.SendTest()
+	if err != nil {
+		h.logger.Error("Test notification failed: %v", err)
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"success": false,
+			"error":   err.Error(),
+		})
+		return
+	}
+
+	h.logger.Info("Test notification sent successfully")
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"success": true,
+	})
 }

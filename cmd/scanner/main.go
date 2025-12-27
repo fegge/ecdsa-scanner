@@ -53,7 +53,7 @@ func main() {
 	}
 
 	// Initialize API
-	handler := api.NewHandler(sc, database, appLogger, cfg.AnkrAPIKey)
+	handler := api.NewHandler(sc, database, appLogger, cfg.AnkrAPIKey, notifier)
 	mux := http.NewServeMux()
 	handler.RegisterRoutes(mux)
 
