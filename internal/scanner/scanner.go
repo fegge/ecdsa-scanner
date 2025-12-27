@@ -53,6 +53,7 @@ type ChainStats struct {
 	LatestBlock  uint64 `json:"latest_block"`
 	Running      bool   `json:"running"`
 	ErrorCount   int    `json:"error_count"`
+	WaitTimeMs   int64  `json:"wait_time_ms"`
 }
 
 // ChainScanner handles scanning for a single chain
@@ -198,6 +199,7 @@ func (s *Scanner) GetChainStats() []ChainStats {
 		st := cs.stats
 		st.Running = cs.running
 		st.ErrorCount = cs.errCount
+		st.WaitTimeMs = cs.estBlockTime.Milliseconds()
 		cs.mu.Unlock()
 		stats = append(stats, st)
 	}

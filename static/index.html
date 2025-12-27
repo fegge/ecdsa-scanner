@@ -517,7 +517,7 @@
                             </div>
                             <div class="chain-stats">
                                 <div>Block: <span>${formatNumber(c.current_block)}</span></div>
-                                <div>Latest: <span>${formatNumber(c.latest_block)}</span></div>
+                                <div>Wait time: <span>${c.wait_time_ms ? (c.wait_time_ms / 1000).toFixed(1) + 's' : '-'}</span></div>
                                 <div>Behind: <span>${formatNumber(c.latest_block - c.current_block)}</span></div>
                                 <div>Errors: <span>${c.error_count}</span></div>
                             </div>
